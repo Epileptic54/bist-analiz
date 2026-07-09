@@ -596,7 +596,7 @@ with col_left:
             fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum[bbu_col], name='Bollinger', legendgroup='bb', legend='legend', line=dict(color='#5b6b8c', width=1)), row=1, col=1)
             fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum[bbl_col], name='Bollinger', legendgroup='bb', legend='legend', showlegend=False, line=dict(color='#5b6b8c', width=1), fill='tonexty', fillcolor='rgba(91,107,140,0.08)'), row=1, col=1)
 
-        # SuperTrend yön kırılımlarında AL / SAT okları
+        # SuperTrend (muhafazakar) yön kırılımlarında AL / SAT okları
         if 'Sinyal_Degisim' in df_gorunum.columns:
             al_df = df_gorunum[df_gorunum['Sinyal_Degisim'] == 2]
             sat_df = df_gorunum[df_gorunum['Sinyal_Degisim'] == -2]
@@ -605,13 +605,31 @@ with col_left:
                 fig.add_trace(go.Scatter(
                     x=al_df['Date'], y=al_df['Low'] * 0.98, mode='markers',
                     marker=dict(symbol='triangle-up', size=11, color='#22c55e'),
-                    name='AL', legend='legend'
+                    name='SuperTrend AL', legend='legend'
                 ), row=1, col=1)
             if not sat_df.empty:
                 fig.add_trace(go.Scatter(
                     x=sat_df['Date'], y=sat_df['High'] * 1.02, mode='markers',
                     marker=dict(symbol='triangle-down', size=11, color='#ef4444'),
-                    name='SAT', legend='legend'
+                    name='SuperTrend SAT', legend='legend'
+                ), row=1, col=1)
+
+        # Optimize Sinyal: MACD kesişimi + SuperTrend trend onaylı, daha sık ama filtreli
+        if 'Optimize_AL' in df_gorunum.columns:
+            opt_al_df = df_gorunum[df_gorunum['Optimize_AL'].astype(bool)]
+            opt_sat_df = df_gorunum[df_gorunum['Optimize_SAT'].astype(bool)]
+
+            if not opt_al_df.empty:
+                fig.add_trace(go.Scatter(
+                    x=opt_al_df['Date'], y=opt_al_df['Low'] * 0.995, mode='markers',
+                    marker=dict(symbol='diamond', size=8, color='#4ade80', line=dict(width=1, color='#131722')),
+                    name='Optimize AL', legend='legend'
+                ), row=1, col=1)
+            if not opt_sat_df.empty:
+                fig.add_trace(go.Scatter(
+                    x=opt_sat_df['Date'], y=opt_sat_df['High'] * 1.005, mode='markers',
+                    marker=dict(symbol='diamond', size=8, color='#f87171', line=dict(width=1, color='#131722')),
+                    name='Optimize SAT', legend='legend'
                 ), row=1, col=1)
 
         # 2. MACD Paneli

@@ -94,6 +94,16 @@ def _macd(close, fast=12, slow=26, signal=9):
     return macd_line, signal_line, histogram
 
 
+def _optimize_sinyalleri(macd_line, signal_line, supertrend_yon):
+    macd_fark = macd_line - signal_line
+    kesisim_yon = macd_fark.apply(lambda x: 1 if x > 0 else -1)
+    kesisim_degisim = kesisim_yon.diff()
+
+    optimize_al = (kesisim_degisim == 2) & (supertrend_yon == 1)
+    optimize_sat = (kesisim_degisim == -2) & (supertrend_yon == -1)
+    return optimize_al, optimize_sat
+
+
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['EMA_50'] = _ema(df['Close'], 50)
     df['EMA_200'] = _ema(df['Close'], 200)
@@ -117,6 +127,10 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['MACD_12_26_9'] = macd_line
     df['MACDs_12_26_9'] = signal_line
     df['MACDh_12_26_9'] = hist
+
+    optimize_al, optimize_sat = _optimize_sinyalleri(macd_line, signal_line, direction)
+    df['Optimize_AL'] = optimize_al
+    df['Optimize_SAT'] = optimize_sat
 
     return df
 
