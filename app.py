@@ -170,6 +170,55 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
+
+def _watchlist_baglantisi():
+    conn = sqlite3.connect('bist_portfolio.db')
+    data_engine.init_ekstra_tablolar(conn)
+    return conn
+
+
+def yeni_hisse_ekle(sembol, ad):
+    sembol = sembol.strip().upper()
+    if not sembol:
+        return False, "Sembol boş olamaz."
+    if not sembol.endswith(".IS"):
+        sembol += ".IS"
+    ticker_db = sembol.replace(".", "_")
+
+    conn = _watchlist_baglantisi()
+    try:
+        mevcut = data_engine.watchlist_getir(conn)
+        if ticker_db in mevcut:
+            return False, f"{sembol} zaten watchlist'te."
+
+        with st.spinner(f"{sembol} doğrulanıyor ve ilk verisi çekiliyor..."):
+            try:
+                taze_df = data_engine.fetch_data(sembol)
+            except Exception as e:
+                return False, f"{sembol} için veri çekilemedi: {e}"
+            if taze_df.empty:
+                return False, f"{sembol} geçerli bir hisse gibi görünmüyor (veri boş döndü)."
+            taze_df = data_engine.add_indicators(taze_df)
+            data_engine.save_to_db(taze_df, sembol, conn)
+
+        data_engine.watchlist_ekle(conn, ticker_db, ad.strip() or sembol.replace(".IS", ""))
+        return True, f"{sembol} watchlist'e eklendi."
+    finally:
+        conn.close()
+
+
+def hisse_sil(ticker_db):
+    conn = _watchlist_baglantisi()
+    try:
+        data_engine.watchlist_sil(conn, ticker_db)
+    finally:
+        conn.close()
+
+
+_wl_conn = _watchlist_baglantisi()
+hisseler = data_engine.watchlist_getir(_wl_conn)
+_wl_conn.close()
+
 # TradingView Tarzı Tam Karanlık (Dark Mode) Kurumsal Arayüz Teması
 st.markdown("""
 <style>
@@ -256,7 +305,8 @@ with buton_col:
             basarisiz_hisseler = []
             conn = sqlite3.connect(data_engine.DB_PATH)
             try:
-                for i, ticker in enumerate(data_engine.TICKERS):
+                for i, ticker_db in enumerate(hisseler.keys()):
+                    ticker = ticker_db.replace('_', '.')
                     if i > 0:
                         time.sleep(1.5)
                     try:
@@ -280,6 +330,36 @@ with buton_col:
         st.rerun()
 
 st.markdown("---")
+
+with st.expander("⚙️ Watchlist Yönetimi"):
+    ekle_col1, ekle_col2, ekle_col3 = st.columns([2, 2, 1])
+    with ekle_col1:
+        yeni_sembol = st.text_input("Yeni Hisse Sembolü (örn. SISE.IS)", key="yeni_sembol_input")
+    with ekle_col2:
+        yeni_ad = st.text_input("Görünen Ad (örn. Şişe Cam)", key="yeni_ad_input")
+    with ekle_col3:
+        st.write("")
+        st.write("")
+        if st.button("➕ Ekle", key="hisse_ekle_btn", use_container_width=True):
+            basarili, mesaj = yeni_hisse_ekle(yeni_sembol, yeni_ad)
+            if basarili:
+                st.success(mesaj)
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.error(mesaj)
+
+    if hisseler:
+        st.markdown("**Mevcut Watchlist:**")
+        for ticker_db, ad in hisseler.items():
+            wl_col1, wl_col2 = st.columns([4, 1])
+            with wl_col1:
+                st.markdown(f"- {ad} ({ticker_db.replace('_', '.')})")
+            with wl_col2:
+                if st.button("🗑 Kaldır", key=f"sil_{ticker_db}"):
+                    hisse_sil(ticker_db)
+                    st.cache_data.clear()
+                    st.rerun()
 
 CHART_BG = "#131722"
 GRID_COLOR = "#2a2e39"
@@ -424,12 +504,9 @@ def detect_rsi_divergence(df, lookback=90, order=3):
     return None
 
 
-def supertrend_performansi(df, son_kac_sinyal=10):
-    if 'Sinyal_Degisim' not in df.columns:
-        return None
-
-    al_indices = df.index[df['Sinyal_Degisim'] == 2].tolist()
-    sat_indices = df.index[df['Sinyal_Degisim'] == -2].tolist()
+def sinyal_performansi(df, al_kosulu, sat_kosulu, son_kac_sinyal=10):
+    al_indices = df.index[al_kosulu].tolist()
+    sat_indices = df.index[sat_kosulu].tolist()
     if not al_indices:
         return None
 
@@ -455,6 +532,12 @@ def supertrend_performansi(df, son_kac_sinyal=10):
         'ortalama_getiri': sum(getiriler) / len(getiriler),
         'acik_pozisyon_var': islemler[-1]['acik'],
     }
+
+
+def supertrend_performansi(df, son_kac_sinyal=10):
+    if 'Sinyal_Degisim' not in df.columns:
+        return None
+    return sinyal_performansi(df, df['Sinyal_Degisim'] == 2, df['Sinyal_Degisim'] == -2, son_kac_sinyal)
 
 
 def build_veri_baglami(hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_durum, finansal_durum,
@@ -492,14 +575,6 @@ def build_veri_baglami(hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_dur
     return "\n".join(f"- {s}" for s in satirlar)
 
 
-# Portföyümüzdeki efsane 5'li
-hisseler = {
-    "ASELS_IS": "Aselsan",
-    "ASTOR_IS": "Astor Enerji",
-    "THYAO_IS": "Türk Hava Yolları",
-    "BIMAS_IS": "BİM Mağazalar",
-    "AKBNK_IS": "Akbank"
-}
 
 # --- PANEL 1: KOMPAKT ÜST METRİKLER ---
 cols = st.columns(len(hisseler))
@@ -519,6 +594,142 @@ for index, (ticker_db, name) in enumerate(hisseler.items()):
                 value=f"{fiyat} TL",
                 delta=f"{prefix}{yuzde_degisim}%"
             )
+
+st.markdown("---")
+
+# --- BİLDİRİM + TOPLU TARAMA ---
+st.markdown("<div class='fintables-header'>🔍 Toplu Tarama</div>", unsafe_allow_html=True)
+
+tarama_satirlari = []
+bugun_sinyal_olanlar = []
+
+for ticker_db, ad in hisseler.items():
+    df_t = load_data(ticker_db)
+    if df_t is None or df_t.empty or len(df_t) < 2:
+        continue
+
+    son = df_t.iloc[-1]
+    onceki = df_t.iloc[-2]
+    degisim = ((son['Close'] - onceki['Close']) / onceki['Close']) * 100
+
+    st_dir_col = next((c for c in df_t.columns if c.startswith('SUPERTd')), None)
+    st_al_mi = bool(st_dir_col and son[st_dir_col] == 1)
+    st_durum_kisa = "AL 🟢" if st_al_mi else "SAT 🔴"
+
+    sinyal_bugun = []
+    if son.get('Sinyal_Degisim') == 2:
+        sinyal_bugun.append('SuperTrend AL')
+    elif son.get('Sinyal_Degisim') == -2:
+        sinyal_bugun.append('SuperTrend SAT')
+    if bool(son.get('Optimize_AL', False)):
+        sinyal_bugun.append('Optimize AL')
+    if bool(son.get('Optimize_SAT', False)):
+        sinyal_bugun.append('Optimize SAT')
+    if bool(son.get('Squeeze_AL', False)):
+        sinyal_bugun.append('Squeeze AL')
+    if bool(son.get('Squeeze_SAT', False)):
+        sinyal_bugun.append('Squeeze SAT')
+
+    if sinyal_bugun:
+        bugun_sinyal_olanlar.append((ad, sinyal_bugun))
+
+    tarama_satirlari.append({
+        'Hisse': ad,
+        'Fiyat': f"{son['Close']:.2f} TL",
+        'Günlük %': f"{degisim:+.2f}%",
+        'RSI': f"{son['RSI_14']:.1f}",
+        'SuperTrend': st_durum_kisa,
+        'Bugün Sinyal': ', '.join(sinyal_bugun) if sinyal_bugun else '—',
+    })
+
+if bugun_sinyal_olanlar:
+    detaylar = '; '.join(f"{ad}: {', '.join(sinyaller)}" for ad, sinyaller in bugun_sinyal_olanlar)
+    st.markdown(f"""
+    <div class='risk-alarm' style='border-color:#22c55e; background: rgba(34,197,94,0.12);'>
+        <b style='color:#22c55e;'>🔔 BUGÜN YENİ SİNYAL</b><br>
+        {detaylar}
+    </div>
+    """, unsafe_allow_html=True)
+
+if tarama_satirlari:
+    st.dataframe(pd.DataFrame(tarama_satirlari), use_container_width=True, hide_index=True)
+
+st.markdown("---")
+
+# --- PORTFÖYÜM ---
+st.markdown("<div class='fintables-header'>💼 PORTFÖYÜM</div>", unsafe_allow_html=True)
+
+_pf_conn = _watchlist_baglantisi()
+portfoy = data_engine.portfoy_getir(_pf_conn)
+_pf_conn.close()
+
+with st.expander("➕ Pozisyon Ekle / Güncelle"):
+    if hisseler:
+        pf_col1, pf_col2, pf_col3, pf_col4 = st.columns([2, 1, 1, 1])
+        with pf_col1:
+            pf_hisse = st.selectbox("Hisse", list(hisseler.values()), key="pf_hisse_secim")
+        with pf_col2:
+            pf_adet = st.number_input("Adet", min_value=0.0, step=1.0, key="pf_adet_input")
+        with pf_col3:
+            pf_maliyet = st.number_input("Ort. Maliyet (TL)", min_value=0.0, step=0.01, key="pf_maliyet_input")
+        with pf_col4:
+            st.write("")
+            st.write("")
+            if st.button("💾 Kaydet", key="pf_kaydet_btn", use_container_width=True):
+                pf_ticker_db = [k for k, v in hisseler.items() if v == pf_hisse][0]
+                _pf_conn2 = _watchlist_baglantisi()
+                if pf_adet <= 0:
+                    data_engine.portfoy_sil(_pf_conn2, pf_ticker_db)
+                else:
+                    data_engine.portfoy_kaydet(_pf_conn2, pf_ticker_db, pf_adet, pf_maliyet)
+                _pf_conn2.close()
+                st.rerun()
+    else:
+        st.info("Önce watchlist'e hisse eklemen gerekiyor.")
+
+if not portfoy:
+    st.info("Henüz portföyüne bir pozisyon eklemedin. Yukarıdaki 'Pozisyon Ekle / Güncelle' kısmından başlayabilirsin.")
+else:
+    pf_satirlari = []
+    toplam_maliyet = 0.0
+    toplam_deger = 0.0
+    for ticker_db, bilgi in portfoy.items():
+        df_pf = load_data(ticker_db)
+        if df_pf is None or df_pf.empty:
+            continue
+        guncel_fiyat = df_pf['Close'].iloc[-1]
+        ad = hisseler.get(ticker_db, ticker_db)
+        adet = bilgi['adet']
+        maliyet = bilgi['maliyet']
+        pozisyon_maliyeti = adet * maliyet
+        pozisyon_degeri = adet * guncel_fiyat
+        kar_zarar = pozisyon_degeri - pozisyon_maliyeti
+        kar_zarar_yuzde = (kar_zarar / pozisyon_maliyeti * 100) if pozisyon_maliyeti else 0
+
+        toplam_maliyet += pozisyon_maliyeti
+        toplam_deger += pozisyon_degeri
+
+        pf_satirlari.append({
+            'Hisse': ad,
+            'Adet': adet,
+            'Ort. Maliyet': f"{maliyet:.2f} TL",
+            'Güncel Fiyat': f"{guncel_fiyat:.2f} TL",
+            'Toplam Değer': f"{pozisyon_degeri:,.2f} TL".replace(',', '.'),
+            'Kâr/Zarar': f"{kar_zarar:+,.2f} TL ({kar_zarar_yuzde:+.1f}%)".replace(',', '.'),
+        })
+
+    if pf_satirlari:
+        st.dataframe(pd.DataFrame(pf_satirlari), use_container_width=True, hide_index=True)
+
+        toplam_kz = toplam_deger - toplam_maliyet
+        toplam_kz_yuzde = (toplam_kz / toplam_maliyet * 100) if toplam_maliyet else 0
+        ozet_cols = st.columns(3)
+        with ozet_cols[0]:
+            st.metric("Toplam Maliyet", f"{toplam_maliyet:,.2f} TL".replace(',', '.'))
+        with ozet_cols[1]:
+            st.metric("Güncel Değer", f"{toplam_deger:,.2f} TL".replace(',', '.'))
+        with ozet_cols[2]:
+            st.metric("Toplam Kâr/Zarar", f"{toplam_kz:,.2f} TL".replace(',', '.'), delta=f"{toplam_kz_yuzde:+.1f}%")
 
 st.markdown("---")
 
@@ -632,6 +843,24 @@ with col_left:
                     name='Optimize SAT', legend='legend'
                 ), row=1, col=1)
 
+        # Squeeze Breakout: Bollinger sıkışması sonrası kırılım
+        if 'Squeeze_AL' in df_gorunum.columns:
+            sq_al_df = df_gorunum[df_gorunum['Squeeze_AL'].astype(bool)]
+            sq_sat_df = df_gorunum[df_gorunum['Squeeze_SAT'].astype(bool)]
+
+            if not sq_al_df.empty:
+                fig.add_trace(go.Scatter(
+                    x=sq_al_df['Date'], y=sq_al_df['Low'] * 0.97, mode='markers',
+                    marker=dict(symbol='star', size=12, color='#22d3ee', line=dict(width=1, color='#131722')),
+                    name='Squeeze AL', legend='legend'
+                ), row=1, col=1)
+            if not sq_sat_df.empty:
+                fig.add_trace(go.Scatter(
+                    x=sq_sat_df['Date'], y=sq_sat_df['High'] * 1.03, mode='markers',
+                    marker=dict(symbol='star', size=12, color='#fb923c', line=dict(width=1, color='#131722')),
+                    name='Squeeze SAT', legend='legend'
+                ), row=1, col=1)
+
         # 2. MACD Paneli
         if 'MACD_12_26_9' in df_gorunum.columns:
             hist_renkleri = ['#22c55e' if v >= 0 else '#ef4444' for v in df_gorunum['MACDh_12_26_9'].fillna(0)]
@@ -680,18 +909,31 @@ with col_left:
         st.plotly_chart(fig, use_container_width=True)
 
         supertrend_perf = supertrend_performansi(df_secilen)
-        if supertrend_perf:
-            st.markdown("<div class='fintables-header'>📈 SuperTrend Sinyal Performansı (Geçmiş)</div>", unsafe_allow_html=True)
-            perf_cols = st.columns(3)
-            with perf_cols[0]:
-                st.metric("Son Sinyal Sayısı", supertrend_perf['toplam_sinyal'])
-            with perf_cols[1]:
-                st.metric("Kazanma Oranı", f"%{supertrend_perf['kazanma_orani']:.0f}")
-            with perf_cols[2]:
-                st.metric("Ortalama Getiri", f"%{supertrend_perf['ortalama_getiri']:+.2f}")
+
+        sinyal_sistemleri = [
+            ('SuperTrend', df_secilen.get('Sinyal_Degisim') == 2, df_secilen.get('Sinyal_Degisim') == -2),
+            ('Optimize', df_secilen.get('Optimize_AL', pd.Series(False, index=df_secilen.index)).astype(bool),
+             df_secilen.get('Optimize_SAT', pd.Series(False, index=df_secilen.index)).astype(bool)),
+            ('Squeeze Breakout', df_secilen.get('Squeeze_AL', pd.Series(False, index=df_secilen.index)).astype(bool),
+             df_secilen.get('Squeeze_SAT', pd.Series(False, index=df_secilen.index)).astype(bool)),
+        ]
+
+        karsilastirma_satirlari = []
+        for sistem_adi, al_kosulu, sat_kosulu in sinyal_sistemleri:
+            perf = sinyal_performansi(df_secilen, al_kosulu, sat_kosulu)
+            if perf:
+                karsilastirma_satirlari.append({
+                    'Sistem': sistem_adi,
+                    'Son Sinyal Sayısı': perf['toplam_sinyal'],
+                    'Kazanma Oranı': f"%{perf['kazanma_orani']:.0f}",
+                    'Ortalama Getiri': f"%{perf['ortalama_getiri']:+.2f}",
+                    'Açık Pozisyon': "Evet" if perf['acik_pozisyon_var'] else "Hayır",
+                })
+
+        if karsilastirma_satirlari:
+            st.markdown("<div class='fintables-header'>📈 Sinyal Performans Karşılaştırması (Geçmiş)</div>", unsafe_allow_html=True)
+            st.dataframe(pd.DataFrame(karsilastirma_satirlari), use_container_width=True, hide_index=True)
             st.caption("⚠️ Geçmiş sinyal performansı gelecekteki sonuçların garantisi değildir.")
-        else:
-            supertrend_perf = None
 
 with col_right:
     fundamentals = fetch_fundamentals(yf_ticker)
