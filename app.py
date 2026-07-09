@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import time
@@ -41,6 +42,53 @@ GADDAR_PERSONA = (
     "calisan gibi: kisa, duz, sade cumleler kurarsin. Edebi benzetme, suslu sifat veya 'adeta', "
     "'sanki', 'bir senfoni gibi' turunden cilali ifadeler kullanmazsin — sadece olguyu ve sonucu soylersin."
 )
+
+GROQ_ARAC_TANIMLARI = [
+    {
+        "type": "function",
+        "function": {
+            "name": "hisse_istatistigi_hesapla",
+            "description": (
+                "Seçili hissenin GERÇEK fiyat/hacim verisinden tam sayısal istatistik hesaplar. "
+                "Ortalama hacim, ortalama kapanış fiyatı, belirli günlük en yüksek/düşük seviye veya "
+                "volatilite gibi bir şey sorulduğunda ASLA tahmin etme; bu aracı çağırarak gerçek "
+                "veriden hesapla."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "metrik": {
+                        "type": "string",
+                        "enum": ["ortalama_hacim", "ortalama_kapanis", "en_yuksek_fiyat", "en_dusuk_fiyat", "volatilite_yuzde"],
+                        "description": "Hesaplanacak istatistik türü",
+                    },
+                    "gun_sayisi": {
+                        "type": "integer",
+                        "description": "Kaç günlük veri üzerinden hesaplanacağı (varsayılan 30)",
+                    },
+                },
+                "required": ["metrik"],
+            },
+        },
+    }
+]
+
+
+def hisse_istatistigi_hesapla(df, metrik, gun_sayisi=30):
+    gun_sayisi = max(1, min(int(gun_sayisi or 30), len(df)))
+    veri = df.tail(gun_sayisi)
+
+    if metrik == "ortalama_hacim":
+        return f"{veri['Volume'].mean():,.0f} LOT ({gun_sayisi} günlük ortalama)".replace(",", ".")
+    if metrik == "ortalama_kapanis":
+        return f"{veri['Close'].mean():.2f} TL ({gun_sayisi} günlük ortalama kapanış)"
+    if metrik == "en_yuksek_fiyat":
+        return f"{veri['High'].max():.2f} TL ({gun_sayisi} günlük en yüksek)"
+    if metrik == "en_dusuk_fiyat":
+        return f"{veri['Low'].min():.2f} TL ({gun_sayisi} günlük en düşük)"
+    if metrik == "volatilite_yuzde":
+        return f"%{veri['Close'].pct_change().std() * 100:.2f} günlük volatilite ({gun_sayisi} günlük)"
+    return "Bilinmeyen metrik."
 
 
 @st.cache_resource
@@ -678,11 +726,39 @@ Veri Bağlamı:
             with st.chat_message("assistant"):
                 with st.spinner("Analiz ediliyor..."):
                     try:
-                        groq_mesajlari = [
-                            {"role": "system", "content": f"{GADDAR_PERSONA}\n\nGüncel Veri Bağlamı:\n{veri_baglami}"}
-                        ] + st.session_state[messages_key]
-                        completion = groq_client.chat.completions.create(model=GROQ_MODEL, messages=groq_mesajlari)
-                        cevap_metni = completion.choices[0].message.content
+                        sistem_mesaji = (
+                            f"{GADDAR_PERSONA}\n\nGüncel Veri Bağlamı:\n{veri_baglami}\n\n"
+                            "Yukarıdaki bağlamda olmayan ortalama hacim, ortalama fiyat, en yüksek/düşük "
+                            "seviye veya volatilite gibi hesaplanabilir bir şey sorulursa ASLA tahmin etme; "
+                            "hisse_istatistigi_hesapla aracını çağırarak gerçek veriden hesapla."
+                        )
+                        groq_mesajlari = [{"role": "system", "content": sistem_mesaji}] + st.session_state[messages_key]
+
+                        asistan_mesaji = None
+                        for _ in range(3):
+                            completion = groq_client.chat.completions.create(
+                                model=GROQ_MODEL,
+                                messages=groq_mesajlari,
+                                tools=GROQ_ARAC_TANIMLARI,
+                                tool_choice="auto",
+                            )
+                            asistan_mesaji = completion.choices[0].message
+                            if not asistan_mesaji.tool_calls:
+                                break
+
+                            groq_mesajlari.append(asistan_mesaji)
+                            for tool_call in asistan_mesaji.tool_calls:
+                                args = json.loads(tool_call.function.arguments or "{}")
+                                sonuc = hisse_istatistigi_hesapla(
+                                    df_secilen, args.get("metrik", ""), args.get("gun_sayisi", 30)
+                                )
+                                groq_mesajlari.append({
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "content": sonuc,
+                                })
+
+                        cevap_metni = asistan_mesaji.content or "Bir cevap üretemedim."
                         st.markdown(cevap_metni)
                         st.session_state[messages_key].append({"role": "assistant", "content": cevap_metni})
                     except Exception as e:
