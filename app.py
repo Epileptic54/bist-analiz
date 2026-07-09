@@ -152,6 +152,27 @@ GROQ_ARAC_TANIMLARI = [
     {
         "type": "function",
         "function": {
+            "name": "destek_direnc_hesapla",
+            "description": (
+                "Seçili hissenin GERÇEK fiyat verisinden swing high/low (yerel tepe ve dip) yöntemiyle "
+                "destek ve direnç seviyelerini hesaplar. Kullanıcı destek, direnç, kritik seviye, teknik "
+                "seviye gibi bir şey sorduğunda ASLA tahmin etme; bu aracı çağırarak gerçek veriden hesapla."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "gun_sayisi": {
+                        "type": "integer",
+                        "description": "Kaç günlük veri üzerinden hesaplanacağı (varsayılan 120)",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "web_arama_yap",
             "description": (
                 "İnternette güncel bilgi arar (haberler, KAP bildirimleri, sektör/şirket gelişmeleri, "
@@ -188,6 +209,46 @@ def hisse_istatistigi_hesapla(df, metrik, gun_sayisi=30):
     if metrik == "volatilite_yuzde":
         return f"%{veri['Close'].pct_change().std() * 100:.2f} günlük volatilite ({gun_sayisi} günlük)"
     return "Bilinmeyen metrik."
+
+
+def _seviyeleri_kumele(seviyeler, esik=0.015):
+    kumelenmis = []
+    for s in seviyeler:
+        if kumelenmis and abs(s - kumelenmis[-1]) / kumelenmis[-1] < esik:
+            continue
+        kumelenmis.append(s)
+    return kumelenmis
+
+
+def destek_direnc_hesapla(df, gun_sayisi=120):
+    gun_sayisi = max(20, min(int(gun_sayisi or 120), len(df)))
+    veri = df.tail(gun_sayisi).reset_index(drop=True)
+    guncel_fiyat = veri['Close'].iloc[-1]
+
+    high = veri['High'].values
+    low = veri['Low'].values
+
+    tepe_idx = _local_extrema_idx(high, order=3, mode="max")
+    dip_idx = _local_extrema_idx(low, order=3, mode="min")
+
+    direnc_seviyeleri = _seviyeleri_kumele(
+        sorted(set(round(float(high[i]), 2) for i in tepe_idx if high[i] > guncel_fiyat))
+    )[:3]
+    destek_seviyeleri = _seviyeleri_kumele(
+        sorted(set(round(float(low[i]), 2) for i in dip_idx if low[i] < guncel_fiyat), reverse=True)
+    )[:3]
+
+    satirlar = [f"Güncel Fiyat: {guncel_fiyat:.2f} TL"]
+    satirlar.append(
+        "Direnç Seviyeleri (yakından uzağa): " + ", ".join(f"{d:.2f} TL" for d in direnc_seviyeleri)
+        if direnc_seviyeleri else "Direnç Seviyeleri: Belirlenemedi (yeterli tepe noktası yok)"
+    )
+    satirlar.append(
+        "Destek Seviyeleri (yakından uzağa): " + ", ".join(f"{d:.2f} TL" for d in destek_seviyeleri)
+        if destek_seviyeleri else "Destek Seviyeleri: Belirlenemedi (yeterli dip noktası yok)"
+    )
+    satirlar.append(f"Analiz Penceresi: Son {gun_sayisi} gün, yerel tepe/dip (swing high/low) yöntemiyle hesaplandı.")
+    return "\n".join(satirlar)
 
 
 @st.cache_resource
@@ -1287,7 +1348,8 @@ Veri Bağlamı:
                                 f"{GADDAR_PERSONA}\n\nGüncel Veri Bağlamı:\n{veri_baglami}\n\n"
                                 "Yukarıdaki bağlamda olmayan ortalama hacim, ortalama fiyat, en yüksek/düşük "
                                 "seviye veya volatilite gibi hesaplanabilir bir şey sorulursa ASLA tahmin etme; "
-                                "hisse_istatistigi_hesapla aracını çağırarak gerçek veriden hesapla. Güncel haber, "
+                                "hisse_istatistigi_hesapla aracını çağırarak gerçek veriden hesapla. Destek, direnç "
+                                "veya kritik teknik seviye sorulursa destek_direnc_hesapla aracını çağır. Güncel haber, "
                                 "KAP bildirimi, sektör bilgisi veya sitedeki veri setinde hiç olmayan genel bir şey "
                                 "sorulursa web_arama_yap aracını çağırarak internetten araştır."
                             )
@@ -1309,6 +1371,8 @@ Veri Bağlamı:
                                         args = json.loads(tool_call.function.arguments or "{}")
                                         if tool_call.function.name == "web_arama_yap":
                                             sonuc = web_arama_yap(args.get("sorgu", ""))
+                                        elif tool_call.function.name == "destek_direnc_hesapla":
+                                            sonuc = destek_direnc_hesapla(df_secilen, args.get("gun_sayisi", 120))
                                         else:
                                             sonuc = hisse_istatistigi_hesapla(
                                                 df_secilen, args.get("metrik", ""), args.get("gun_sayisi", 30)
@@ -1328,6 +1392,8 @@ Veri Bağlamı:
                                     arac_adi, args = sizinti
                                     if arac_adi == "web_arama_yap":
                                         sonuc = web_arama_yap(args.get("sorgu", ""))
+                                    elif arac_adi == "destek_direnc_hesapla":
+                                        sonuc = destek_direnc_hesapla(df_secilen, args.get("gun_sayisi", 120))
                                     else:
                                         sonuc = hisse_istatistigi_hesapla(
                                             df_secilen, args.get("metrik", ""), args.get("gun_sayisi", 30)
