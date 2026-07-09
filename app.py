@@ -336,6 +336,23 @@ def load_data(ticker):
     return df
 
 
+@st.cache_data(ttl=60)
+def get_canli_fiyat(ticker_db):
+    """yfinance gunluk mum verisi (history) gecikmeli/eksik olabildigi icin
+    (Yahoo bazen o gunun OHLC'sini NaN birakiyor), gercek son fiyati
+    fast_info uzerinden ceker. Basarisiz olursa (None, None) doner."""
+    yf_symbol = ticker_db.replace('_', '.')
+    try:
+        fi = yf.Ticker(yf_symbol).fast_info
+        son_fiyat = fi.get('lastPrice') if hasattr(fi, 'get') else fi.last_price
+        onceki_kapanis = fi.get('previousClose') if hasattr(fi, 'get') else fi.previous_close
+        if son_fiyat is None or onceki_kapanis is None:
+            return None, None
+        return round(float(son_fiyat), 2), round(float(onceki_kapanis), 2)
+    except Exception:
+        return None, None
+
+
 @st.cache_data(ttl=3600)
 def load_index_data():
     try:
@@ -689,8 +706,13 @@ for index, (ticker_db, name) in enumerate(hisseler.items()):
     if df is not None and not df.empty and len(df) >= 2:
         son_satir = df.iloc[-1]
         onceki_satir = df.iloc[-2]
-        fiyat = round(son_satir['Close'], 2)
-        yuzde_degisim = round(((fiyat - onceki_satir['Close']) / onceki_satir['Close']) * 100, 2)
+        canli_fiyat, canli_onceki_kapanis = get_canli_fiyat(ticker_db)
+        if canli_fiyat is not None:
+            fiyat = canli_fiyat
+            yuzde_degisim = round(((fiyat - canli_onceki_kapanis) / canli_onceki_kapanis) * 100, 2)
+        else:
+            fiyat = round(son_satir['Close'], 2)
+            yuzde_degisim = round(((fiyat - onceki_satir['Close']) / onceki_satir['Close']) * 100, 2)
 
         prefix = "+" if yuzde_degisim > 0 else ""
 
@@ -716,7 +738,13 @@ for ticker_db, ad in hisseler.items():
 
     son = df_t.iloc[-1]
     onceki = df_t.iloc[-2]
-    degisim = ((son['Close'] - onceki['Close']) / onceki['Close']) * 100
+    canli_fiyat_t, canli_onceki_t = get_canli_fiyat(ticker_db)
+    if canli_fiyat_t is not None:
+        fiyat_gosterim = canli_fiyat_t
+        degisim = ((canli_fiyat_t - canli_onceki_t) / canli_onceki_t) * 100
+    else:
+        fiyat_gosterim = son['Close']
+        degisim = ((son['Close'] - onceki['Close']) / onceki['Close']) * 100
 
     st_dir_col = next((c for c in df_t.columns if c.startswith('SUPERTd')), None)
     st_al_mi = bool(st_dir_col and son[st_dir_col] == 1)
@@ -741,7 +769,7 @@ for ticker_db, ad in hisseler.items():
 
     tarama_satirlari.append({
         'Hisse': ad,
-        'Fiyat': f"{son['Close']:.2f} TL",
+        'Fiyat': f"{fiyat_gosterim:.2f} TL",
         'Günlük %': f"{degisim:+.2f}%",
         'RSI': f"{son['RSI_14']:.1f}",
         'SuperTrend': st_durum_kisa,
@@ -815,7 +843,8 @@ else:
         df_pf = load_data(ticker_db)
         if df_pf is None or df_pf.empty:
             continue
-        guncel_fiyat = df_pf['Close'].iloc[-1]
+        canli_fiyat_pf, _ = get_canli_fiyat(ticker_db)
+        guncel_fiyat = canli_fiyat_pf if canli_fiyat_pf is not None else df_pf['Close'].iloc[-1]
         ad = hisseler.get(ticker_db, ticker_db)
         adet = bilgi['adet']
         maliyet = bilgi['maliyet']
@@ -1070,7 +1099,10 @@ with col_right:
     st.markdown("<div class='fintables-header'>🧠 GEMİNİ DERİN ANALİZ RAPORU</div>", unsafe_allow_html=True)
 
     if df_secilen is not None and not df_secilen.empty:
-        son_s = df_secilen.iloc[-1]
+        son_s = df_secilen.iloc[-1].copy()
+        canli_fiyat_secilen, _ = get_canli_fiyat(secilen_ticker)
+        if canli_fiyat_secilen is not None:
+            son_s['Close'] = canli_fiyat_secilen
 
         bogalar = 0
         toplam_kriter = 5
