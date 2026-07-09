@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(python -m py_compile app.py)",
+      "PowerShell(python \"C:\\\\Users\\\\baha\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-baha-Desktop-Bist-Dashboard\\\\76718161-925c-42a3-b0dd-0c8bc473fad6\\\\scratchpad\\\\test_perf.py\")"
+    ]
+  }
+}

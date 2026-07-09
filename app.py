@@ -424,9 +424,43 @@ def detect_rsi_divergence(df, lookback=90, order=3):
     return None
 
 
+def supertrend_performansi(df, son_kac_sinyal=10):
+    if 'Sinyal_Degisim' not in df.columns:
+        return None
+
+    al_indices = df.index[df['Sinyal_Degisim'] == 2].tolist()
+    sat_indices = df.index[df['Sinyal_Degisim'] == -2].tolist()
+    if not al_indices:
+        return None
+
+    islemler = []
+    for giris_idx in al_indices:
+        sonraki_satlar = [s for s in sat_indices if s > giris_idx]
+        cikis_idx = sonraki_satlar[0] if sonraki_satlar else df.index[-1]
+        giris_fiyat = df.loc[giris_idx, 'Close']
+        cikis_fiyat = df.loc[cikis_idx, 'Close']
+        getiri = (cikis_fiyat / giris_fiyat - 1) * 100
+        islemler.append({'getiri': getiri, 'acik': not sonraki_satlar})
+
+    islemler = islemler[-son_kac_sinyal:]
+    if not islemler:
+        return None
+
+    getiriler = [t['getiri'] for t in islemler]
+    kazanan = sum(1 for g in getiriler if g > 0)
+
+    return {
+        'toplam_sinyal': len(islemler),
+        'kazanma_orani': (kazanan / len(islemler)) * 100,
+        'ortalama_getiri': sum(getiriler) / len(getiriler),
+        'acik_pozisyon_var': islemler[-1]['acik'],
+    }
+
+
 def build_veri_baglami(hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_durum, finansal_durum,
                         momentum_10g, fark, divergence, hedef_fiyat, stop_loss,
-                        fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka):
+                        fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka,
+                        supertrend_perf=None):
     satirlar = [
         f"Hisse: {hisse_adi}",
         f"Güncel Fiyat: {son_s['Close']:.2f} TL",
@@ -447,6 +481,12 @@ def build_veri_baglami(hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_dur
     satirlar.append(f"Özsermaye Kârlılığı (ROE): {fmt(roe * 100 if roe is not None else None, '%')}")
     satirlar.append(f"Finansal Sağlık: {finansal_durum}")
     satirlar.append(f"Sistemin kural tabanlı kararı: {karar} (Güven Skoru %{int(skor)})")
+    if supertrend_perf:
+        satirlar.append(
+            f"Geçmiş SuperTrend Sinyal Performansı (son {supertrend_perf['toplam_sinyal']} AL sinyali): "
+            f"Kazanma oranı %{supertrend_perf['kazanma_orani']:.0f}, ortalama getiri %{supertrend_perf['ortalama_getiri']:+.2f}"
+            f"{' (son sinyal hâlâ açık pozisyonda)' if supertrend_perf['acik_pozisyon_var'] else ''}"
+        )
     if is_banka:
         satirlar.append("NOT: Bu bir banka hissesidir; Cari Oran ve Net Borç/FAVÖK gibi sanayi rasyoları burada geçersizdir, sadece F/K, PD/DD ve ROE üzerinden bankacılık sağlığını yorumla.")
     return "\n".join(f"- {s}" for s in satirlar)
@@ -490,14 +530,26 @@ with col_left:
     yf_ticker = secilen_ticker.replace('_', '.')
 
     df_secilen = load_data(secilen_ticker)
+    supertrend_perf = None
 
     if df_secilen is not None and not df_secilen.empty:
         son_hacim = df_secilen['Volume'].iloc[-1]
         st.markdown(f"**İşlem Hacmi:** {son_hacim:,.0f} LOT".replace(",", "."))
 
-        bbu_col = next((c for c in df_secilen.columns if c.startswith('BBU_20')), None)
-        bbl_col = next((c for c in df_secilen.columns if c.startswith('BBL_20')), None)
-        bbb_col = next((c for c in df_secilen.columns if c.startswith('BBB_20')), None)
+        gun_haritasi = {"1 Ay": 30, "3 Ay": 90, "6 Ay": 180, "1 Yıl": 366}
+        zaman_araligi = st.radio(
+            "Zaman Aralığı", list(gun_haritasi.keys()), index=3, horizontal=True,
+            key=f"zaman_araligi_{secilen_ticker}", label_visibility="collapsed"
+        )
+        son_tarih = df_secilen['Date'].max()
+        baslangic_tarih = son_tarih - pd.Timedelta(days=gun_haritasi[zaman_araligi])
+        df_gorunum = df_secilen[df_secilen['Date'] >= baslangic_tarih].reset_index(drop=True)
+        if df_gorunum.empty:
+            df_gorunum = df_secilen
+
+        bbu_col = next((c for c in df_gorunum.columns if c.startswith('BBU_20')), None)
+        bbl_col = next((c for c in df_gorunum.columns if c.startswith('BBL_20')), None)
+        bbb_col = next((c for c in df_gorunum.columns if c.startswith('BBB_20')), None)
 
         fig = make_subplots(
             rows=4, cols=1,
@@ -514,40 +566,40 @@ with col_left:
 
         # 0. Hacim (Volume) - fiyat panelinin arkasında yarı saydam
         hacim_renkleri = [
-            'rgba(34,197,94,0.35)' if df_secilen['Close'].iloc[i] >= df_secilen['Open'].iloc[i] else 'rgba(239,68,68,0.35)'
-            for i in range(len(df_secilen))
+            'rgba(34,197,94,0.35)' if df_gorunum['Close'].iloc[i] >= df_gorunum['Open'].iloc[i] else 'rgba(239,68,68,0.35)'
+            for i in range(len(df_gorunum))
         ]
         fig.add_trace(go.Bar(
-            x=df_secilen['Date'], y=df_secilen['Volume'], name='Hacim',
+            x=df_gorunum['Date'], y=df_gorunum['Volume'], name='Hacim',
             marker_color=hacim_renkleri, showlegend=False
         ), row=1, col=1, secondary_y=True)
-        max_hacim = df_secilen['Volume'].max()
+        max_hacim = df_gorunum['Volume'].max()
         fig.update_yaxes(range=[0, max_hacim * 4], showticklabels=False, showgrid=False, secondary_y=True, row=1, col=1)
 
         # 1. Candlestick (Mum) Grafik
         fig.add_trace(go.Candlestick(
-            x=df_secilen['Date'],
-            open=df_secilen['Open'],
-            high=df_secilen['High'],
-            low=df_secilen['Low'],
-            close=df_secilen['Close'],
+            x=df_gorunum['Date'],
+            open=df_gorunum['Open'],
+            high=df_gorunum['High'],
+            low=df_gorunum['Low'],
+            close=df_gorunum['Close'],
             name='OHLC',
             showlegend=False
         ), row=1, col=1)
 
-        if 'EMA_50' in df_secilen.columns:
-            fig.add_trace(go.Scatter(x=df_secilen['Date'], y=df_secilen['EMA_50'], name='EMA 50', legend='legend', line=dict(color='#f0a500', width=1.3)), row=1, col=1)
-        if 'EMA_200' in df_secilen.columns:
-            fig.add_trace(go.Scatter(x=df_secilen['Date'], y=df_secilen['EMA_200'], name='EMA 200', legend='legend', line=dict(color='#0891b2', width=1.3)), row=1, col=1)
+        if 'EMA_50' in df_gorunum.columns:
+            fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum['EMA_50'], name='EMA 50', legend='legend', line=dict(color='#f0a500', width=1.3)), row=1, col=1)
+        if 'EMA_200' in df_gorunum.columns:
+            fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum['EMA_200'], name='EMA 200', legend='legend', line=dict(color='#0891b2', width=1.3)), row=1, col=1)
 
         if bbu_col and bbl_col:
-            fig.add_trace(go.Scatter(x=df_secilen['Date'], y=df_secilen[bbu_col], name='Bollinger', legendgroup='bb', legend='legend', line=dict(color='#5b6b8c', width=1)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df_secilen['Date'], y=df_secilen[bbl_col], name='Bollinger', legendgroup='bb', legend='legend', showlegend=False, line=dict(color='#5b6b8c', width=1), fill='tonexty', fillcolor='rgba(91,107,140,0.08)'), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum[bbu_col], name='Bollinger', legendgroup='bb', legend='legend', line=dict(color='#5b6b8c', width=1)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum[bbl_col], name='Bollinger', legendgroup='bb', legend='legend', showlegend=False, line=dict(color='#5b6b8c', width=1), fill='tonexty', fillcolor='rgba(91,107,140,0.08)'), row=1, col=1)
 
         # SuperTrend yön kırılımlarında AL / SAT okları
-        if 'Sinyal_Degisim' in df_secilen.columns:
-            al_df = df_secilen[df_secilen['Sinyal_Degisim'] == 2]
-            sat_df = df_secilen[df_secilen['Sinyal_Degisim'] == -2]
+        if 'Sinyal_Degisim' in df_gorunum.columns:
+            al_df = df_gorunum[df_gorunum['Sinyal_Degisim'] == 2]
+            sat_df = df_gorunum[df_gorunum['Sinyal_Degisim'] == -2]
 
             if not al_df.empty:
                 fig.add_trace(go.Scatter(
@@ -563,28 +615,28 @@ with col_left:
                 ), row=1, col=1)
 
         # 2. MACD Paneli
-        if 'MACD_12_26_9' in df_secilen.columns:
-            hist_renkleri = ['#22c55e' if v >= 0 else '#ef4444' for v in df_secilen['MACDh_12_26_9'].fillna(0)]
-            fig.add_trace(go.Bar(x=df_secilen['Date'], y=df_secilen['MACDh_12_26_9'], name='Histogram', marker_color=hist_renkleri, showlegend=False), row=2, col=1)
-            fig.add_trace(go.Scatter(x=df_secilen['Date'], y=df_secilen['MACD_12_26_9'], name='MACD', legend='legend2', line=dict(color='#2962ff', width=1.3)), row=2, col=1)
-            fig.add_trace(go.Scatter(x=df_secilen['Date'], y=df_secilen['MACDs_12_26_9'], name='Sinyal', legend='legend2', line=dict(color='#ff9800', width=1.3)), row=2, col=1)
+        if 'MACD_12_26_9' in df_gorunum.columns:
+            hist_renkleri = ['#22c55e' if v >= 0 else '#ef4444' for v in df_gorunum['MACDh_12_26_9'].fillna(0)]
+            fig.add_trace(go.Bar(x=df_gorunum['Date'], y=df_gorunum['MACDh_12_26_9'], name='Histogram', marker_color=hist_renkleri, showlegend=False), row=2, col=1)
+            fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum['MACD_12_26_9'], name='MACD', legend='legend2', line=dict(color='#2962ff', width=1.3)), row=2, col=1)
+            fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum['MACDs_12_26_9'], name='Sinyal', legend='legend2', line=dict(color='#ff9800', width=1.3)), row=2, col=1)
 
         # 3. RSI ve Stokastik RSI Paneli
-        if 'RSI_14' in df_secilen.columns:
-            fig.add_trace(go.Scatter(x=df_secilen['Date'], y=df_secilen['RSI_14'], name='RSI 14', legend='legend3', line=dict(color='#a855f7', width=1.3)), row=3, col=1)
-            fig.add_shape(type="line", x0=df_secilen['Date'].min(), y0=70, x1=df_secilen['Date'].max(), y1=70, line=dict(color="#ef4444", dash="dash", width=1), row=3, col=1)
-            fig.add_shape(type="line", x0=df_secilen['Date'].min(), y0=30, x1=df_secilen['Date'].max(), y1=30, line=dict(color="#22c55e", dash="dash", width=1), row=3, col=1)
+        if 'RSI_14' in df_gorunum.columns:
+            fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum['RSI_14'], name='RSI 14', legend='legend3', line=dict(color='#a855f7', width=1.3)), row=3, col=1)
+            fig.add_shape(type="line", x0=df_gorunum['Date'].min(), y0=70, x1=df_gorunum['Date'].max(), y1=70, line=dict(color="#ef4444", dash="dash", width=1), row=3, col=1)
+            fig.add_shape(type="line", x0=df_gorunum['Date'].min(), y0=30, x1=df_gorunum['Date'].max(), y1=30, line=dict(color="#22c55e", dash="dash", width=1), row=3, col=1)
 
-        stochrsi_k_col = next((c for c in df_secilen.columns if c.startswith('STOCHRSIk')), None)
-        stochrsi_d_col = next((c for c in df_secilen.columns if c.startswith('STOCHRSId')), None)
+        stochrsi_k_col = next((c for c in df_gorunum.columns if c.startswith('STOCHRSIk')), None)
+        stochrsi_d_col = next((c for c in df_gorunum.columns if c.startswith('STOCHRSId')), None)
         if stochrsi_k_col:
-            fig.add_trace(go.Scatter(x=df_secilen['Date'], y=df_secilen[stochrsi_k_col], name='StochRSI %K', legend='legend3', line=dict(color='#0284c7', width=1, dash='dot')), row=3, col=1)
+            fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum[stochrsi_k_col], name='StochRSI %K', legend='legend3', line=dict(color='#0284c7', width=1, dash='dot')), row=3, col=1)
         if stochrsi_d_col:
-            fig.add_trace(go.Scatter(x=df_secilen['Date'], y=df_secilen[stochrsi_d_col], name='StochRSI %D', legend='legend3', line=dict(color='#f59e0b', width=1, dash='dot')), row=3, col=1)
+            fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum[stochrsi_d_col], name='StochRSI %D', legend='legend3', line=dict(color='#f59e0b', width=1, dash='dot')), row=3, col=1)
 
         # 4. Bollinger Bandwidth Paneli
         if bbb_col:
-            fig.add_trace(go.Scatter(x=df_secilen['Date'], y=df_secilen[bbb_col], name='BB Bandwidth', legend='legend4', line=dict(color='#eab308', width=1.3), fill='tozeroy', fillcolor='rgba(234,179,8,0.08)'), row=4, col=1)
+            fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum[bbb_col], name='BB Bandwidth', legend='legend4', line=dict(color='#eab308', width=1.3), fill='tozeroy', fillcolor='rgba(234,179,8,0.08)'), row=4, col=1)
 
         legend_style = dict(orientation='h', bgcolor='rgba(0,0,0,0)', bordercolor='rgba(0,0,0,0)', font=dict(size=9, color=TEXT_COLOR), tracegroupgap=6)
 
@@ -608,6 +660,20 @@ with col_left:
         fig.update_xaxes(gridcolor=GRID_COLOR, showticklabels=True, row=4, col=1)
         fig.update_yaxes(gridcolor=GRID_COLOR)
         st.plotly_chart(fig, use_container_width=True)
+
+        supertrend_perf = supertrend_performansi(df_secilen)
+        if supertrend_perf:
+            st.markdown("<div class='fintables-header'>📈 SuperTrend Sinyal Performansı (Geçmiş)</div>", unsafe_allow_html=True)
+            perf_cols = st.columns(3)
+            with perf_cols[0]:
+                st.metric("Son Sinyal Sayısı", supertrend_perf['toplam_sinyal'])
+            with perf_cols[1]:
+                st.metric("Kazanma Oranı", f"%{supertrend_perf['kazanma_orani']:.0f}")
+            with perf_cols[2]:
+                st.metric("Ortalama Getiri", f"%{supertrend_perf['ortalama_getiri']:+.2f}")
+            st.caption("⚠️ Geçmiş sinyal performansı gelecekteki sonuçların garantisi değildir.")
+        else:
+            supertrend_perf = None
 
 with col_right:
     fundamentals = fetch_fundamentals(yf_ticker)
@@ -684,7 +750,8 @@ with col_right:
         veri_baglami = build_veri_baglami(
             secilen_hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_durum, finansal_durum,
             momentum_10g, fark, divergence, hedef_fiyat, stop_loss,
-            fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka
+            fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka,
+            supertrend_perf
         )
 
     rapor_key = f"gemini_rapor_{secilen_ticker}"
