@@ -25,7 +25,7 @@ def _get_secret(key):
 
 
 GEMINI_API_KEY = _get_secret("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-2.5-flash-lite"
 
 GADDAR_PERSONA = (
     "Sen 25 yillik tecrubeye sahip, gaddar, asiri mukemmeliyetci, lafini hic esirgemeyen, "
@@ -556,8 +556,8 @@ with col_right:
     rapor_key = f"gemini_rapor_{secilen_ticker}"
 
     if gemini_client is not None and veri_baglami is not None:
-        yenile_tiklandi = st.button("🔄 Raporu Yenile", key=f"rapor_yenile_{secilen_ticker}")
-        if rapor_key not in st.session_state or yenile_tiklandi:
+        baslat_tiklandi = st.button("🧠 Gaddar Gemini Analizini Başlat", key=f"rapor_baslat_{secilen_ticker}")
+        if baslat_tiklandi:
             rapor_prompt = f"""{GADDAR_PERSONA}
 
 Aşağıdaki güncel piyasa verilerine dayanarak {secilen_hisse_adi} hissesi için TÜRKÇE, uzun ve derinlemesine bir analiz raporu yaz. Rapor TAM OLARAK şu 4 başlığı bu sırayla, aynen bu şekilde (emojili ve iki nokta üst üste ile) kullanmalı; her başlığın altında en az 3-4 cümlelik, veriye dayalı, doğrudan ve sert bir analiz olmalı:
