@@ -760,59 +760,62 @@ Veri Bağlamı:
         if messages_key not in st.session_state:
             st.session_state[messages_key] = []
 
-        for msg in st.session_state[messages_key]:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
+        sohbet_kutusu = st.container(height=420, border=True)
 
-        kullanici_sorusu = st.chat_input("Kanka, bu hissenin teknik görünümünü bir de bana sor...")
-        if kullanici_sorusu:
-            st.session_state[messages_key].append({"role": "user", "content": kullanici_sorusu})
-            with st.chat_message("user"):
-                st.markdown(kullanici_sorusu)
-            with st.chat_message("assistant"):
-                with st.spinner("Analiz ediliyor..."):
-                    try:
-                        sistem_mesaji = (
-                            f"{GADDAR_PERSONA}\n\nGüncel Veri Bağlamı:\n{veri_baglami}\n\n"
-                            "Yukarıdaki bağlamda olmayan ortalama hacim, ortalama fiyat, en yüksek/düşük "
-                            "seviye veya volatilite gibi hesaplanabilir bir şey sorulursa ASLA tahmin etme; "
-                            "hisse_istatistigi_hesapla aracını çağırarak gerçek veriden hesapla. Güncel haber, "
-                            "KAP bildirimi, sektör bilgisi veya sitedeki veri setinde hiç olmayan genel bir şey "
-                            "sorulursa web_arama_yap aracını çağırarak internetten araştır."
-                        )
-                        groq_mesajlari = [{"role": "system", "content": sistem_mesaji}] + st.session_state[messages_key]
+        with sohbet_kutusu:
+            for msg in st.session_state[messages_key]:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
 
-                        asistan_mesaji = None
-                        for _ in range(3):
-                            completion = groq_client.chat.completions.create(
-                                model=GROQ_MODEL,
-                                messages=groq_mesajlari,
-                                tools=GROQ_ARAC_TANIMLARI,
-                                tool_choice="auto",
+            kullanici_sorusu = st.chat_input("Kanka, bu hissenin teknik görünümünü bir de bana sor...")
+            if kullanici_sorusu:
+                st.session_state[messages_key].append({"role": "user", "content": kullanici_sorusu})
+                with st.chat_message("user"):
+                    st.markdown(kullanici_sorusu)
+                with st.chat_message("assistant"):
+                    with st.spinner("Analiz ediliyor..."):
+                        try:
+                            sistem_mesaji = (
+                                f"{GADDAR_PERSONA}\n\nGüncel Veri Bağlamı:\n{veri_baglami}\n\n"
+                                "Yukarıdaki bağlamda olmayan ortalama hacim, ortalama fiyat, en yüksek/düşük "
+                                "seviye veya volatilite gibi hesaplanabilir bir şey sorulursa ASLA tahmin etme; "
+                                "hisse_istatistigi_hesapla aracını çağırarak gerçek veriden hesapla. Güncel haber, "
+                                "KAP bildirimi, sektör bilgisi veya sitedeki veri setinde hiç olmayan genel bir şey "
+                                "sorulursa web_arama_yap aracını çağırarak internetten araştır."
                             )
-                            asistan_mesaji = completion.choices[0].message
-                            if not asistan_mesaji.tool_calls:
-                                break
+                            groq_mesajlari = [{"role": "system", "content": sistem_mesaji}] + st.session_state[messages_key]
 
-                            groq_mesajlari.append(asistan_mesaji)
-                            for tool_call in asistan_mesaji.tool_calls:
-                                args = json.loads(tool_call.function.arguments or "{}")
-                                if tool_call.function.name == "web_arama_yap":
-                                    sonuc = web_arama_yap(args.get("sorgu", ""))
-                                else:
-                                    sonuc = hisse_istatistigi_hesapla(
-                                        df_secilen, args.get("metrik", ""), args.get("gun_sayisi", 30)
-                                    )
-                                groq_mesajlari.append({
-                                    "role": "tool",
-                                    "tool_call_id": tool_call.id,
-                                    "content": sonuc,
-                                })
+                            asistan_mesaji = None
+                            for _ in range(3):
+                                completion = groq_client.chat.completions.create(
+                                    model=GROQ_MODEL,
+                                    messages=groq_mesajlari,
+                                    tools=GROQ_ARAC_TANIMLARI,
+                                    tool_choice="auto",
+                                )
+                                asistan_mesaji = completion.choices[0].message
+                                if not asistan_mesaji.tool_calls:
+                                    break
 
-                        cevap_metni = asistan_mesaji.content or "Bir cevap üretemedim."
-                        st.markdown(cevap_metni)
-                        st.session_state[messages_key].append({"role": "assistant", "content": cevap_metni})
-                    except Exception as e:
-                        st.error(f"Groq isteği başarısız oldu: {e}")
+                                groq_mesajlari.append(asistan_mesaji)
+                                for tool_call in asistan_mesaji.tool_calls:
+                                    args = json.loads(tool_call.function.arguments or "{}")
+                                    if tool_call.function.name == "web_arama_yap":
+                                        sonuc = web_arama_yap(args.get("sorgu", ""))
+                                    else:
+                                        sonuc = hisse_istatistigi_hesapla(
+                                            df_secilen, args.get("metrik", ""), args.get("gun_sayisi", 30)
+                                        )
+                                    groq_mesajlari.append({
+                                        "role": "tool",
+                                        "tool_call_id": tool_call.id,
+                                        "content": sonuc,
+                                    })
+
+                            cevap_metni = asistan_mesaji.content or "Bir cevap üretemedim."
+                            st.markdown(cevap_metni)
+                            st.session_state[messages_key].append({"role": "assistant", "content": cevap_metni})
+                        except Exception as e:
+                            st.error(f"Groq isteği başarısız oldu: {e}")
     else:
         st.info("Canlı soru-cevap için proje kök dizinindeki .env dosyasına GROQ_API_KEY eklemen gerekiyor.")
