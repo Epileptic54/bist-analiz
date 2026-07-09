@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sqlite3
 import time
 
@@ -31,7 +32,19 @@ GEMINI_API_KEY = _get_secret("GEMINI_API_KEY")
 GEMINI_MODEL = "gemini-2.5-flash-lite"
 
 GROQ_API_KEY = _get_secret("GROQ_API_KEY")
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = "openai/gpt-oss-120b"
+
+_ARAC_SIZINTISI_DESENI = re.compile(r"<function=([\w_]+)>\s*(\{.*?\})\s*</function>", re.DOTALL)
+
+
+def _sizinti_arac_cagrisini_yakala(metin):
+    eslesme = _ARAC_SIZINTISI_DESENI.search(metin or "")
+    if not eslesme:
+        return None
+    try:
+        return eslesme.group(1), json.loads(eslesme.group(2))
+    except Exception:
+        return None
 
 TAVILY_API_KEY = _get_secret("TAVILY_API_KEY")
 
@@ -794,23 +807,47 @@ Veri Bağlamı:
                                     tool_choice="auto",
                                 )
                                 asistan_mesaji = completion.choices[0].message
-                                if not asistan_mesaji.tool_calls:
-                                    break
 
-                                groq_mesajlari.append(asistan_mesaji)
-                                for tool_call in asistan_mesaji.tool_calls:
-                                    args = json.loads(tool_call.function.arguments or "{}")
-                                    if tool_call.function.name == "web_arama_yap":
+                                if asistan_mesaji.tool_calls:
+                                    groq_mesajlari.append(asistan_mesaji)
+                                    for tool_call in asistan_mesaji.tool_calls:
+                                        args = json.loads(tool_call.function.arguments or "{}")
+                                        if tool_call.function.name == "web_arama_yap":
+                                            sonuc = web_arama_yap(args.get("sorgu", ""))
+                                        else:
+                                            sonuc = hisse_istatistigi_hesapla(
+                                                df_secilen, args.get("metrik", ""), args.get("gun_sayisi", 30)
+                                            )
+                                        groq_mesajlari.append({
+                                            "role": "tool",
+                                            "tool_call_id": tool_call.id,
+                                            "content": sonuc,
+                                        })
+                                    continue
+
+                                # Bazı modeller ara sıra gerçek tool_calls yerine fonksiyon çağrısını
+                                # düz metin olarak sızdırıyor (<function=...>...</function>). Bunu
+                                # yakalayıp kullanıcıya çiğ metin göstermeden aracı biz çalıştırıyoruz.
+                                sizinti = _sizinti_arac_cagrisini_yakala(asistan_mesaji.content)
+                                if sizinti:
+                                    arac_adi, args = sizinti
+                                    if arac_adi == "web_arama_yap":
                                         sonuc = web_arama_yap(args.get("sorgu", ""))
                                     else:
                                         sonuc = hisse_istatistigi_hesapla(
                                             df_secilen, args.get("metrik", ""), args.get("gun_sayisi", 30)
                                         )
+                                    groq_mesajlari.append({"role": "assistant", "content": asistan_mesaji.content})
                                     groq_mesajlari.append({
-                                        "role": "tool",
-                                        "tool_call_id": tool_call.id,
-                                        "content": sonuc,
+                                        "role": "user",
+                                        "content": (
+                                            f"Araç sonucu: {sonuc}\n\nBuna dayanarak soruyu normal, düz metinle "
+                                            "cevapla; fonksiyon çağrısı söz dizimi (<function=...>) kullanma."
+                                        ),
                                     })
+                                    continue
+
+                                break
 
                             cevap_metni = asistan_mesaji.content or "Bir cevap üretemedim."
                             st.markdown(cevap_metni)
