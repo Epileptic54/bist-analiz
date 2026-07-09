@@ -556,7 +556,7 @@ with col_right:
     rapor_key = f"gemini_rapor_{secilen_ticker}"
 
     if gemini_client is not None and veri_baglami is not None:
-        baslat_tiklandi = st.button("🧠 Gaddar Gemini Analizini Başlat", key=f"rapor_baslat_{secilen_ticker}")
+        baslat_tiklandi = st.button("🧠 Gemini Analizini Başlat", key=f"rapor_baslat_{secilen_ticker}")
         if baslat_tiklandi:
             rapor_prompt = f"""{GADDAR_PERSONA}
 
@@ -565,11 +565,11 @@ Aşağıdaki güncel piyasa verilerine dayanarak {secilen_hisse_adi} hissesi iç
 📊 Trend ve İvme Analizi:
 🎯 Osilatör ve Güç Kontrolü:
 💸 Fintables Temel Analiz Süzgeci:
-🚨 Gaddar Son Karar ve Risk Alarmı:
+🚨 Son Karar ve Risk Alarmı:
 
 Kurallar:
 - "Fintables Temel Analiz Süzgeci" bölümünde, veri bağlamında Cari Oran veya Net Borç/FAVÖK yoksa bunlardan hiç bahsetme; sadece F/K, PD/DD ve ROE üzerinden yorum yap.
-- "Gaddar Son Karar ve Risk Alarmı" bölümünde asla yuvarlak, muğlak cümle kurma; riskleri ve tuzakları doğrudan söyle.
+- "Son Karar ve Risk Alarmı" bölümünde asla yuvarlak, muğlak cümle kurma; riskleri ve tuzakları doğrudan söyle.
 - Kesin "al/sat" emri verme ama net bir yönelim ve gerekçe sun.
 - Her başlığın altında EN FAZLA 2-3 kısa cümle yaz. Uzun, süslü, edebi cümle kurma; bir çalışanın yöneticisine sözlü rapor verir gibi kısa ve net konuş. Sıfat yığma, benzetme yapma, doğrudan olguyu ve sonucu söyle.
 
