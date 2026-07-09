@@ -4,6 +4,7 @@ import re
 import sqlite3
 import time
 
+import anthropic
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -47,6 +48,66 @@ def _sizinti_arac_cagrisini_yakala(metin):
         return None
 
 TAVILY_API_KEY = _get_secret("TAVILY_API_KEY")
+
+ANTHROPIC_API_KEY = _get_secret("ANTHROPIC_API_KEY")
+CLAUDE_MODEL = "claude-opus-4-8"
+
+
+@st.cache_resource
+def get_anthropic_client():
+    if not ANTHROPIC_API_KEY or "buraya" in ANTHROPIC_API_KEY:
+        return None
+    return anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+
+def claude_ust_akil_raporu(veri_baglami, hisse_adi):
+    client = get_anthropic_client()
+    if client is None:
+        return None, "Claude API anahtarı yapılandırılmamış (ANTHROPIC_API_KEY eksik)."
+
+    prompt = f"""{hisse_adi} hissesi için, aşağıdaki teknik veri özetini başlangıç noktası olarak kullanarak
+ama ona bağlı kalmadan, kendi bağımsız araştırmanı (güncel haberler, piyasa koşulları, sektör
+durumu) web araması yaparak yürütüp kurumsal kalitede kısa bir yatırım bankası araştırma notu yaz.
+
+Teknik Veri Özeti:
+{veri_baglami}
+
+Rapor TAM OLARAK şu formatta olsun:
+**Tavsiye:** (AL / TUT / SAT)
+**12 Aylık Hedef Fiyat:** (TL)
+
+(3-4 kısa paragraf: güncel piyasa koşulları, sektörel gelişmeler, teknik görünüm özeti — gerçek araştırmana dayanarak)
+
+**Ana Riskler:**
+- ...
+- ...
+
+En fazla 300-350 kelime yaz, gereksiz uzatma yapma. Türkçe yaz."""
+
+    try:
+        with client.messages.stream(
+            model=CLAUDE_MODEL,
+            max_tokens=8192,
+            thinking={"type": "adaptive"},
+            output_config={"effort": "high"},
+            tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 5}],
+            messages=[{"role": "user", "content": prompt}],
+        ) as stream:
+            response = stream.get_final_message()
+
+        if response.stop_reason == "refusal":
+            return None, "Claude bu isteği güvenlik politikası gereği reddetti."
+
+        metin_parcalari = [b.text for b in response.content if b.type == "text"]
+        rapor = "\n\n".join(metin_parcalari).strip()
+        if not rapor:
+            return None, "Claude boş bir yanıt döndürdü."
+        return rapor, None
+    except anthropic.APIStatusError as e:
+        return None, f"Claude API hatası: {e.message}"
+    except Exception as e:
+        return None, f"Claude isteği başarısız oldu: {e}"
+
 
 GADDAR_PERSONA = (
     "Sen 25 yillik tecrubeye sahip, gaddar, asiri mukemmeliyetci, lafini hic esirgemeyen, "
@@ -454,7 +515,7 @@ with buton_col:
             st.warning(f"Şu hisseler için veri çekilemedi (Yahoo Finance hız sınırı/ağ hatası olabilir, birazdan tekrar dene): {', '.join(basarisiz_hisseler)}")
         load_data.clear()
         for key in list(st.session_state.keys()):
-            if key.startswith(("gemini_", "chat_", "messages_")):
+            if key.startswith(("gemini_", "chat_", "messages_", "claude_")):
                 del st.session_state[key]
         st.rerun()
 
@@ -1062,6 +1123,26 @@ with col_right:
             fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka,
             karsilastirma_satirlari
         )
+
+    with st.expander("🏛️ Üst Akıl: Bağımsız Yatırım Bankası Raporu (Claude)", expanded=False):
+        claude_client = get_anthropic_client()
+        ust_akil_key = f"claude_rapor_{secilen_ticker}"
+        if claude_client is None:
+            st.info("Bu özellik için proje kök dizinindeki .env dosyasına ANTHROPIC_API_KEY eklemen gerekiyor.")
+        elif veri_baglami is not None:
+            if st.button("🔍 Claude ile Bağımsız Araştırma Yap", key=f"claude_btn_{secilen_ticker}"):
+                with st.spinner("Claude web'de araştırma yapıyor ve rapor hazırlıyor... (bir dakika kadar sürebilir)"):
+                    claude_rapor, claude_hata = claude_ust_akil_raporu(veri_baglami, secilen_hisse_adi)
+                    if claude_hata:
+                        st.error(claude_hata)
+                    else:
+                        st.session_state[ust_akil_key] = claude_rapor
+            if st.session_state.get(ust_akil_key):
+                with st.container(border=True):
+                    st.markdown(st.session_state[ust_akil_key])
+                st.caption("⚠️ Bu rapor yapay zeka tarafından üretilmiştir, yatırım tavsiyesi değildir.")
+        else:
+            st.info("Bu hisse için veri yüklenemedi.")
 
     rapor_key = f"gemini_rapor_{secilen_ticker}"
 
