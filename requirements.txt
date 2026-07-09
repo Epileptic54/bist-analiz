@@ -4,3 +4,4 @@ plotly==6.8.0
 yfinance==1.5.1
 python-dotenv==1.2.2
 google-genai==2.10.0
+groq==1.5.0

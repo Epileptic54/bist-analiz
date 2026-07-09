@@ -7,7 +7,7 @@ import streamlit as st
 import yfinance as yf
 from dotenv import load_dotenv
 from google import genai
-from google.genai import types
+from groq import Groq
 from plotly.subplots import make_subplots
 
 import data_engine
@@ -27,6 +27,9 @@ def _get_secret(key):
 GEMINI_API_KEY = _get_secret("GEMINI_API_KEY")
 GEMINI_MODEL = "gemini-2.5-flash-lite"
 
+GROQ_API_KEY = _get_secret("GROQ_API_KEY")
+GROQ_MODEL = "llama-3.3-70b-versatile"
+
 GADDAR_PERSONA = (
     "Sen 25 yillik tecrubeye sahip, gaddar, asiri mukemmeliyetci, lafini hic esirgemeyen, "
     "veri odakli kidemli bir BIST finans analistisin. Kullaniciyi yumusak, muglak cumlelerle "
@@ -44,6 +47,13 @@ def get_gemini_client():
     if not GEMINI_API_KEY or "buraya" in GEMINI_API_KEY:
         return None
     return genai.Client(api_key=GEMINI_API_KEY)
+
+
+@st.cache_resource
+def get_groq_client():
+    if not GROQ_API_KEY:
+        return None
+    return Groq(api_key=GROQ_API_KEY)
 
 
 st.set_page_config(
@@ -631,17 +641,12 @@ Veri Bağlamı:
 
     st.markdown("<div class='fintables-header'>💬 CANLI SORU-CEVAP</div>", unsafe_allow_html=True)
 
-    if gemini_client is not None and veri_baglami is not None:
-        chat_key = f"chat_{secilen_ticker}"
+    groq_client = get_groq_client()
+
+    if groq_client is not None and veri_baglami is not None:
         messages_key = f"messages_{secilen_ticker}"
 
-        if chat_key not in st.session_state:
-            st.session_state[chat_key] = gemini_client.chats.create(
-                model=GEMINI_MODEL,
-                config=types.GenerateContentConfig(
-                    system_instruction=f"{GADDAR_PERSONA}\n\nGüncel Veri Bağlamı:\n{veri_baglami}"
-                )
-            )
+        if messages_key not in st.session_state:
             st.session_state[messages_key] = []
 
         for msg in st.session_state[messages_key]:
@@ -656,10 +661,14 @@ Veri Bağlamı:
             with st.chat_message("assistant"):
                 with st.spinner("Analiz ediliyor..."):
                     try:
-                        cevap = st.session_state[chat_key].send_message(kullanici_sorusu)
-                        st.markdown(cevap.text)
-                        st.session_state[messages_key].append({"role": "assistant", "content": cevap.text})
+                        groq_mesajlari = [
+                            {"role": "system", "content": f"{GADDAR_PERSONA}\n\nGüncel Veri Bağlamı:\n{veri_baglami}"}
+                        ] + st.session_state[messages_key]
+                        completion = groq_client.chat.completions.create(model=GROQ_MODEL, messages=groq_mesajlari)
+                        cevap_metni = completion.choices[0].message.content
+                        st.markdown(cevap_metni)
+                        st.session_state[messages_key].append({"role": "assistant", "content": cevap_metni})
                     except Exception as e:
-                        st.error(f"Gemini isteği başarısız oldu: {e}")
+                        st.error(f"Groq isteği başarısız oldu: {e}")
     else:
-        st.info("Canlı soru-cevap için proje kök dizinindeki .env dosyasına GEMINI_API_KEY eklemen gerekiyor.")
+        st.info("Canlı soru-cevap için proje kök dizinindeki .env dosyasına GROQ_API_KEY eklemen gerekiyor.")
