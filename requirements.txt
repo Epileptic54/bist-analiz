@@ -1,10 +1,6 @@
 streamlit==1.59.1
 pandas==3.0.3
-pandas_ta==0.4.71b0
 plotly==6.8.0
 yfinance==1.5.1
 python-dotenv==1.2.2
 google-genai==2.10.0
-numba>=0.59
-llvmlite>=0.42
-tqdm==4.68.4

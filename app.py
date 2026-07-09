@@ -2,7 +2,6 @@ import os
 import sqlite3
 
 import pandas as pd
-import pandas_ta as ta
 import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
@@ -195,8 +194,6 @@ def load_data(ticker):
         return df
 
     df['Date'] = pd.to_datetime(df['Date'])
-    df.ta.bbands(length=20, std=2, append=True)
-    df.ta.macd(fast=12, slow=26, signal=9, append=True)
 
     st_dir_col = next((c for c in df.columns if c.startswith('SUPERTd')), None)
     if st_dir_col:
