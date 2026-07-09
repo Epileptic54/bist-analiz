@@ -10,6 +10,7 @@ TICKERS = ["ASELS.IS", "ASTOR.IS", "THYAO.IS", "BIMAS.IS", "AKBNK.IS"]
 def fetch_data(ticker: str) -> pd.DataFrame:
     df = yf.Ticker(ticker).history(period="1y", interval="1d")
     df = df.drop(columns=["Dividends", "Stock Splits"], errors="ignore")
+    df = df.dropna(subset=["Close"])
     return df
 
 

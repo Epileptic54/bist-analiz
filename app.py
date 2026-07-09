@@ -323,6 +323,10 @@ def load_data(ticker):
     if df.empty:
         return df
 
+    df = df.dropna(subset=['Close']).reset_index(drop=True)
+    if df.empty:
+        return df
+
     df['Date'] = pd.to_datetime(df['Date'])
 
     st_dir_col = next((c for c in df.columns if c.startswith('SUPERTd')), None)
@@ -338,6 +342,7 @@ def load_index_data():
         idx = yf.Ticker("XU100.IS").history(period="1y", interval="1d")
         if idx.empty:
             return None
+        idx = idx.dropna(subset=['Close'])
         idx = idx.reset_index()
         idx['Date'] = pd.to_datetime(idx['Date'])
         return idx
