@@ -82,15 +82,16 @@ Rapor TAM OLARAK şu formatta olsun:
 - ...
 - ...
 
-En fazla 300-350 kelime yaz, gereksiz uzatma yapma. Türkçe yaz."""
+En fazla 300-350 kelime yaz, gereksiz uzatma yapma. Türkçe yaz.
+En fazla 2 web araması yap; sadece en kritik güncel gelişmeyi ve analist hedef fiyat beklentisini doğrulamak için ara, gereksiz yere fazla arama yapma."""
 
     try:
         with client.messages.stream(
             model=CLAUDE_MODEL,
-            max_tokens=8192,
+            max_tokens=4096,
             thinking={"type": "adaptive"},
-            output_config={"effort": "high"},
-            tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 5}],
+            output_config={"effort": "medium"},
+            tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 2}],
             messages=[{"role": "user", "content": prompt}],
         ) as stream:
             response = stream.get_final_message()
