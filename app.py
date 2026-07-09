@@ -220,10 +220,10 @@ def _seviyeleri_kumele(seviyeler, esik=0.015):
     return kumelenmis
 
 
-def destek_direnc_hesapla(df, gun_sayisi=120):
+def _destek_direnc_seviyeleri(df, gun_sayisi=120, guncel_fiyat_override=None):
     gun_sayisi = max(20, min(int(gun_sayisi or 120), len(df)))
     veri = df.tail(gun_sayisi).reset_index(drop=True)
-    guncel_fiyat = veri['Close'].iloc[-1]
+    guncel_fiyat = guncel_fiyat_override if guncel_fiyat_override is not None else veri['Close'].iloc[-1]
 
     high = veri['High'].values
     low = veri['Low'].values
@@ -238,6 +238,12 @@ def destek_direnc_hesapla(df, gun_sayisi=120):
         sorted(set(round(float(low[i]), 2) for i in dip_idx if low[i] < guncel_fiyat), reverse=True)
     )[:3]
 
+    return guncel_fiyat, direnc_seviyeleri, destek_seviyeleri, gun_sayisi
+
+
+def destek_direnc_hesapla(df, gun_sayisi=120):
+    guncel_fiyat, direnc_seviyeleri, destek_seviyeleri, gun_sayisi_eff = _destek_direnc_seviyeleri(df, gun_sayisi)
+
     satirlar = [f"Güncel Fiyat: {guncel_fiyat:.2f} TL"]
     satirlar.append(
         "Direnç Seviyeleri (yakından uzağa): " + ", ".join(f"{d:.2f} TL" for d in direnc_seviyeleri)
@@ -247,7 +253,7 @@ def destek_direnc_hesapla(df, gun_sayisi=120):
         "Destek Seviyeleri (yakından uzağa): " + ", ".join(f"{d:.2f} TL" for d in destek_seviyeleri)
         if destek_seviyeleri else "Destek Seviyeleri: Belirlenemedi (yeterli dip noktası yok)"
     )
-    satirlar.append(f"Analiz Penceresi: Son {gun_sayisi} gün, yerel tepe/dip (swing high/low) yöntemiyle hesaplandı.")
+    satirlar.append(f"Analiz Penceresi: Son {gun_sayisi_eff} gün, yerel tepe/dip (swing high/low) yöntemiyle hesaplandı.")
     return "\n".join(satirlar)
 
 
@@ -721,7 +727,7 @@ def sinyal_performansi(df, al_kosulu, sat_kosulu, son_kac_sinyal=10):
 def build_veri_baglami(hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_durum, finansal_durum,
                         momentum_10g, fark, divergence, hedef_fiyat, stop_loss,
                         fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka,
-                        sinyal_karsilastirma=None):
+                        sinyal_karsilastirma=None, direnc_seviyeleri=None, destek_seviyeleri=None):
     satirlar = [
         f"Hisse: {hisse_adi}",
         f"Güncel Fiyat: {son_s['Close']:.2f} TL",
@@ -731,6 +737,10 @@ def build_veri_baglami(hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_dur
         f"10 Günlük Momentum: {fmt(momentum_10g, '%')}",
         f"BIST100'e Göre Göreli Güç Farkı: {fmt(fark, ' puan') if fark is not None else 'Veri Yok'}",
         f"RSI Uyuşmazlığı: {divergence or 'Yok'}",
+        f"Direnç Seviyeleri (yakından uzağa, kırılırsa yukarı hareket hızlanır): "
+        + (", ".join(f"{d:.2f} TL" for d in direnc_seviyeleri) if direnc_seviyeleri else "Belirlenemedi"),
+        f"Destek Seviyeleri (yakından uzağa, kırılırsa aşağı hareket hızlanır): "
+        + (", ".join(f"{d:.2f} TL" for d in destek_seviyeleri) if destek_seviyeleri else "Belirlenemedi"),
         f"Matematiksel Hedef Fiyat: {hedef_fiyat:.2f} TL",
         f"Stop-Loss (EMA200): {stop_loss:.2f} TL",
         f"F/K Oranı: {fmt(fk)}",
@@ -1216,11 +1226,15 @@ with col_right:
         hedef_fiyat = max(son_s[bbu_col], direnc) if bbu_col else direnc
         stop_loss = son_s['EMA_200']
 
+        _, direnc_seviyeleri, destek_seviyeleri, _ = _destek_direnc_seviyeleri(
+            df_secilen, gun_sayisi=120, guncel_fiyat_override=son_s['Close']
+        )
+
         veri_baglami = build_veri_baglami(
             secilen_hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_durum, finansal_durum,
             momentum_10g, fark, divergence, hedef_fiyat, stop_loss,
             fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka,
-            karsilastirma_satirlari
+            karsilastirma_satirlari, direnc_seviyeleri, destek_seviyeleri
         )
 
     with st.expander("🏛️ Üst Akıl: Bağımsız Yatırım Bankası Raporu (Claude)", expanded=False):
@@ -1250,15 +1264,17 @@ with col_right:
         if baslat_tiklandi:
             rapor_prompt = f"""{GADDAR_PERSONA}
 
-Aşağıdaki güncel piyasa verilerine dayanarak {secilen_hisse_adi} hissesi için TÜRKÇE, uzun ve derinlemesine bir analiz raporu yaz. Rapor TAM OLARAK şu 4 başlığı bu sırayla, aynen bu şekilde (emojili ve iki nokta üst üste ile) kullanmalı; her başlığın altında en az 3-4 cümlelik, veriye dayalı, doğrudan ve sert bir analiz olmalı:
+Aşağıdaki güncel piyasa verilerine dayanarak {secilen_hisse_adi} hissesi için TÜRKÇE, uzun ve derinlemesine bir analiz raporu yaz. Rapor TAM OLARAK şu 5 başlığı bu sırayla, aynen bu şekilde (emojili ve iki nokta üst üste ile) kullanmalı; her başlığın altında en az 3-4 cümlelik, veriye dayalı, doğrudan ve sert bir analiz olmalı:
 
 📊 Trend ve İvme Analizi:
 🎯 Osilatör ve Güç Kontrolü:
 💸 Fintables Temel Analiz Süzgeci:
+🗺️ Yol Haritası (Destek/Direnç ve Kırılım Noktaları):
 🚨 Son Karar ve Risk Alarmı:
 
 Kurallar:
 - "Fintables Temel Analiz Süzgeci" bölümünde, veri bağlamında Cari Oran veya Net Borç/FAVÖK yoksa bunlardan hiç bahsetme; sadece F/K, PD/DD ve ROE üzerinden yorum yap.
+- "Yol Haritası" bölümünde veri bağlamındaki Direnç ve Destek Seviyelerini birebir kullan: en yakın direncin üzerinde kırılım olursa fiyatın hangi seviyeye (bir sonraki dirence) doğru hareket edebileceğini, en yakın desteğin altında kırılım olursa hangi seviyeye kadar sarkabileceğini somut TL rakamlarıyla söyle. Uydurma seviye kullanma, sadece verilenleri kullan.
 - "Son Karar ve Risk Alarmı" bölümünde asla yuvarlak, muğlak cümle kurma; riskleri ve tuzakları doğrudan söyle.
 - Kesin "al/sat" emri verme ama net bir yönelim ve gerekçe sun.
 - Her başlığın altında EN FAZLA 2-3 kısa cümle yaz. Uzun, süslü, edebi cümle kurma; bir çalışanın yöneticisine sözlü rapor verir gibi kısa ve net konuş. Sıfat yığma, benzetme yapma, doğrudan olguyu ve sonucu söyle.
