@@ -576,6 +576,10 @@ def build_veri_baglami(hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_dur
 
 
 
+if not hisseler:
+    st.warning("Watchlist'in boş. Yukarıdaki '⚙️ Watchlist Yönetimi' kısmından en az bir hisse ekle.")
+    st.stop()
+
 # --- PANEL 1: KOMPAKT ÜST METRİKLER ---
 cols = st.columns(len(hisseler))
 for index, (ticker_db, name) in enumerate(hisseler.items()):
@@ -665,18 +669,27 @@ _pf_conn.close()
 
 with st.expander("➕ Pozisyon Ekle / Güncelle"):
     if hisseler:
-        pf_col1, pf_col2, pf_col3, pf_col4 = st.columns([2, 1, 1, 1])
-        with pf_col1:
-            pf_hisse = st.selectbox("Hisse", list(hisseler.values()), key="pf_hisse_secim")
+        pf_hisse = st.selectbox("Hisse", list(hisseler.values()), key="pf_hisse_secim")
+        pf_ticker_db = [k for k, v in hisseler.items() if v == pf_hisse][0]
+        mevcut_pozisyon = portfoy.get(pf_ticker_db, {})
+
+        pf_col2, pf_col3, pf_col4 = st.columns([1, 1, 1])
         with pf_col2:
-            pf_adet = st.number_input("Adet", min_value=0.0, step=1.0, key="pf_adet_input")
+            pf_adet = st.number_input(
+                "Adet", min_value=0.0, step=1.0,
+                value=float(mevcut_pozisyon.get('adet', 0.0)),
+                key=f"pf_adet_input_{pf_ticker_db}"
+            )
         with pf_col3:
-            pf_maliyet = st.number_input("Ort. Maliyet (TL)", min_value=0.0, step=0.01, key="pf_maliyet_input")
+            pf_maliyet = st.number_input(
+                "Ort. Maliyet (TL)", min_value=0.0, step=0.01,
+                value=float(mevcut_pozisyon.get('maliyet', 0.0)),
+                key=f"pf_maliyet_input_{pf_ticker_db}"
+            )
         with pf_col4:
             st.write("")
             st.write("")
             if st.button("💾 Kaydet", key="pf_kaydet_btn", use_container_width=True):
-                pf_ticker_db = [k for k, v in hisseler.items() if v == pf_hisse][0]
                 _pf_conn2 = _watchlist_baglantisi()
                 if pf_adet <= 0:
                     data_engine.portfoy_sil(_pf_conn2, pf_ticker_db)
@@ -684,6 +697,9 @@ with st.expander("➕ Pozisyon Ekle / Güncelle"):
                     data_engine.portfoy_kaydet(_pf_conn2, pf_ticker_db, pf_adet, pf_maliyet)
                 _pf_conn2.close()
                 st.rerun()
+
+        if mevcut_pozisyon:
+            st.caption(f"Mevcut kayıt: {mevcut_pozisyon['adet']:.0f} adet, {mevcut_pozisyon['maliyet']:.2f} TL ortalama maliyet.")
     else:
         st.info("Önce watchlist'e hisse eklemen gerekiyor.")
 
