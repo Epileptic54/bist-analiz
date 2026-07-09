@@ -219,152 +219,6 @@ _wl_conn = _watchlist_baglantisi()
 hisseler = data_engine.watchlist_getir(_wl_conn)
 _wl_conn.close()
 
-# TradingView Tarzı Tam Karanlık (Dark Mode) Kurumsal Arayüz Teması
-st.markdown("""
-<style>
-    .stApp {
-        background-color: #131722;
-        color: #d1d4dc;
-    }
-    h1, h2, h3, p, span, label {
-        color: #d1d4dc;
-    }
-    .ai-card {
-        background: #1c2030;
-        padding: 18px 20px;
-        border-radius: 10px;
-        border: 1px solid #2a2e39;
-        margin-bottom: 14px;
-    }
-    .ai-card p, .ai-card h3 {
-        color: #d1d4dc;
-    }
-    .fintables-header {
-        background-color: #1c2030;
-        color: #d1d4dc;
-        padding: 10px 15px;
-        font-weight: 800;
-        border-radius: 6px;
-        font-size: 14.5px;
-        letter-spacing: 0.3px;
-        margin-bottom: 12px;
-        margin-top: 10px;
-        border: 1px solid #2a2e39;
-    }
-    .fin-table {
-        width: 100%;
-        border-collapse: collapse;
-        table-layout: fixed;
-        margin-top: 4px;
-    }
-    .fin-table td {
-        padding: 10px 6px;
-        font-size: 13px;
-        font-weight: 500;
-        border-bottom: 1px solid #2a2e39;
-        word-wrap: break-word;
-        overflow-wrap: break-word;
-        color: #d1d4dc;
-    }
-    .fin-table tr:last-child td {
-        border-bottom: none;
-    }
-    .fin-table td:first-child {
-        color: #868c9c;
-        font-weight: 700;
-        width: 62%;
-    }
-    .fin-table td:last-child {
-        text-align: right;
-        font-weight: 800;
-        color: #f0f1f5;
-        width: 38%;
-    }
-    .risk-alarm {
-        background: rgba(239, 68, 68, 0.12);
-        border: 1px solid #ef4444;
-        border-radius: 8px;
-        padding: 14px;
-        margin-top: 10px;
-        font-size: 13.5px;
-        font-weight: 500;
-        color: #d1d4dc;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-baslik_col, buton_col = st.columns([5, 1])
-with baslik_col:
-    st.title("🤖 BIST Yapay Zekâ Yatırım Danışmanlığı & Karar Destek Terminali")
-    st.markdown("*Teknik Analiz Üst Seviye Strateji Odası*")
-with buton_col:
-    st.write("")
-    st.write("")
-    if st.button("🔄 Verileri Yenile", use_container_width=True):
-        with st.spinner("Piyasa verileri güncelleniyor..."):
-            basarisiz_hisseler = []
-            conn = sqlite3.connect(data_engine.DB_PATH)
-            try:
-                for i, ticker_db in enumerate(hisseler.keys()):
-                    ticker = ticker_db.replace('_', '.')
-                    if i > 0:
-                        time.sleep(1.5)
-                    try:
-                        taze_df = data_engine.fetch_data(ticker)
-                    except Exception:
-                        basarisiz_hisseler.append(ticker)
-                        continue
-                    if not taze_df.empty:
-                        taze_df = data_engine.add_indicators(taze_df)
-                        data_engine.save_to_db(taze_df, ticker, conn)
-                    else:
-                        basarisiz_hisseler.append(ticker)
-            finally:
-                conn.close()
-        if basarisiz_hisseler:
-            st.warning(f"Şu hisseler için veri çekilemedi (Yahoo Finance hız sınırı/ağ hatası olabilir, birazdan tekrar dene): {', '.join(basarisiz_hisseler)}")
-        st.cache_data.clear()
-        for key in list(st.session_state.keys()):
-            if key.startswith(("gemini_", "chat_", "messages_")):
-                del st.session_state[key]
-        st.rerun()
-
-st.markdown("---")
-
-with st.expander("⚙️ Watchlist Yönetimi"):
-    ekle_col1, ekle_col2, ekle_col3 = st.columns([2, 2, 1])
-    with ekle_col1:
-        yeni_sembol = st.text_input("Yeni Hisse Sembolü (örn. SISE.IS)", key="yeni_sembol_input")
-    with ekle_col2:
-        yeni_ad = st.text_input("Görünen Ad (örn. Şişe Cam)", key="yeni_ad_input")
-    with ekle_col3:
-        st.write("")
-        st.write("")
-        if st.button("➕ Ekle", key="hisse_ekle_btn", use_container_width=True):
-            basarili, mesaj = yeni_hisse_ekle(yeni_sembol, yeni_ad)
-            if basarili:
-                st.success(mesaj)
-                st.cache_data.clear()
-                st.rerun()
-            else:
-                st.error(mesaj)
-
-    if hisseler:
-        st.markdown("**Mevcut Watchlist:**")
-        for ticker_db, ad in hisseler.items():
-            wl_col1, wl_col2 = st.columns([4, 1])
-            with wl_col1:
-                st.markdown(f"- {ad} ({ticker_db.replace('_', '.')})")
-            with wl_col2:
-                if st.button("🗑 Kaldır", key=f"sil_{ticker_db}"):
-                    hisse_sil(ticker_db)
-                    st.cache_data.clear()
-                    st.rerun()
-
-CHART_BG = "#131722"
-GRID_COLOR = "#2a2e39"
-TEXT_COLOR = "#d1d4dc"
-
 
 def _tabloyu_olustur(ticker):
     yf_symbol = ticker.replace('_', '.')
@@ -457,6 +311,190 @@ def fetch_fundamentals(yf_ticker):
     }
 
 
+# TradingView Tarzı Tam Karanlık (Dark Mode) Kurumsal Arayüz Teması
+st.markdown("""
+<style>
+    .stApp {
+        background-color: #131722;
+        color: #d1d4dc;
+    }
+    h1, h2, h3, p, span, label {
+        color: #d1d4dc;
+    }
+    .ai-card {
+        background: #1c2030;
+        padding: 18px 20px;
+        border-radius: 10px;
+        border: 1px solid #2a2e39;
+        margin-bottom: 14px;
+    }
+    .ai-card p, .ai-card h3 {
+        color: #d1d4dc;
+    }
+    .fintables-header {
+        background-color: #1c2030;
+        color: #d1d4dc;
+        padding: 10px 15px;
+        font-weight: 800;
+        border-radius: 6px;
+        font-size: 14.5px;
+        letter-spacing: 0.3px;
+        margin-bottom: 12px;
+        margin-top: 10px;
+        border: 1px solid #2a2e39;
+    }
+    .fin-table {
+        width: 100%;
+        border-collapse: collapse;
+        table-layout: fixed;
+        margin-top: 4px;
+    }
+    .fin-table td {
+        padding: 10px 6px;
+        font-size: 13px;
+        font-weight: 500;
+        border-bottom: 1px solid #2a2e39;
+        word-wrap: break-word;
+        overflow-wrap: break-word;
+        color: #d1d4dc;
+    }
+    .fin-table tr:last-child td {
+        border-bottom: none;
+    }
+    .fin-table td:first-child {
+        color: #868c9c;
+        font-weight: 700;
+        width: 62%;
+    }
+    .fin-table td:last-child {
+        text-align: right;
+        font-weight: 800;
+        color: #f0f1f5;
+        width: 38%;
+    }
+    .risk-alarm {
+        background: rgba(239, 68, 68, 0.12);
+        border: 1px solid #ef4444;
+        border-radius: 8px;
+        padding: 14px;
+        margin-top: 10px;
+        font-size: 13.5px;
+        font-weight: 500;
+        color: #d1d4dc;
+    }
+    .grid-table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 4px;
+        font-size: 12.5px;
+    }
+    .grid-table th {
+        background-color: #1c2030;
+        color: #868c9c;
+        font-weight: 700;
+        text-align: left;
+        padding: 9px 10px;
+        border-bottom: 2px solid #2a2e39;
+        font-size: 11px;
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
+    }
+    .grid-table td {
+        padding: 8px 10px;
+        border-bottom: 1px solid #2a2e39;
+        color: #d1d4dc;
+    }
+    .grid-table tr:last-child td {
+        border-bottom: none;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+def html_tablo(satirlar):
+    if not satirlar:
+        return ""
+    kolonlar = list(satirlar[0].keys())
+    basliklar = "".join(f"<th>{k}</th>" for k in kolonlar)
+    govde = "".join(
+        "<tr>" + "".join(f"<td>{satir[k]}</td>" for k in kolonlar) + "</tr>"
+        for satir in satirlar
+    )
+    return f"<table class='grid-table'><thead><tr>{basliklar}</tr></thead><tbody>{govde}</tbody></table>"
+
+baslik_col, buton_col = st.columns([5, 1])
+with baslik_col:
+    st.title("🤖 BIST Yapay Zekâ Yatırım Danışmanlığı & Karar Destek Terminali")
+    st.markdown("*Teknik Analiz Üst Seviye Strateji Odası*")
+with buton_col:
+    st.write("")
+    st.write("")
+    if st.button("🔄 Verileri Yenile", use_container_width=True):
+        with st.spinner("Piyasa verileri güncelleniyor..."):
+            basarisiz_hisseler = []
+            conn = sqlite3.connect(data_engine.DB_PATH)
+            try:
+                for i, ticker_db in enumerate(hisseler.keys()):
+                    ticker = ticker_db.replace('_', '.')
+                    if i > 0:
+                        time.sleep(1.5)
+                    try:
+                        taze_df = data_engine.fetch_data(ticker)
+                    except Exception:
+                        basarisiz_hisseler.append(ticker)
+                        continue
+                    if not taze_df.empty:
+                        taze_df = data_engine.add_indicators(taze_df)
+                        data_engine.save_to_db(taze_df, ticker, conn)
+                    else:
+                        basarisiz_hisseler.append(ticker)
+            finally:
+                conn.close()
+        if basarisiz_hisseler:
+            st.warning(f"Şu hisseler için veri çekilemedi (Yahoo Finance hız sınırı/ağ hatası olabilir, birazdan tekrar dene): {', '.join(basarisiz_hisseler)}")
+        load_data.clear()
+        for key in list(st.session_state.keys()):
+            if key.startswith(("gemini_", "chat_", "messages_")):
+                del st.session_state[key]
+        st.rerun()
+
+st.markdown("---")
+
+with st.expander("⚙️ Watchlist Yönetimi"):
+    ekle_col1, ekle_col2, ekle_col3 = st.columns([2, 2, 1])
+    with ekle_col1:
+        yeni_sembol = st.text_input("Yeni Hisse Sembolü (örn. SISE.IS)", key="yeni_sembol_input")
+    with ekle_col2:
+        yeni_ad = st.text_input("Görünen Ad (örn. Şişe Cam)", key="yeni_ad_input")
+    with ekle_col3:
+        st.write("")
+        st.write("")
+        if st.button("➕ Ekle", key="hisse_ekle_btn", use_container_width=True):
+            basarili, mesaj = yeni_hisse_ekle(yeni_sembol, yeni_ad)
+            if basarili:
+                st.success(mesaj)
+                load_data.clear()
+                st.rerun()
+            else:
+                st.error(mesaj)
+
+    if hisseler:
+        st.markdown("**Mevcut Watchlist:**")
+        for ticker_db, ad in hisseler.items():
+            wl_col1, wl_col2 = st.columns([4, 1])
+            with wl_col1:
+                st.markdown(f"- {ad} ({ticker_db.replace('_', '.')})")
+            with wl_col2:
+                if st.button("🗑 Kaldır", key=f"sil_{ticker_db}"):
+                    hisse_sil(ticker_db)
+                    load_data.clear()
+                    st.rerun()
+
+CHART_BG = "#131722"
+GRID_COLOR = "#2a2e39"
+TEXT_COLOR = "#d1d4dc"
+
+
 def fmt(value, suffix='', decimals=2):
     if value is None:
         return 'Veri Yok'
@@ -534,16 +572,11 @@ def sinyal_performansi(df, al_kosulu, sat_kosulu, son_kac_sinyal=10):
     }
 
 
-def supertrend_performansi(df, son_kac_sinyal=10):
-    if 'Sinyal_Degisim' not in df.columns:
-        return None
-    return sinyal_performansi(df, df['Sinyal_Degisim'] == 2, df['Sinyal_Degisim'] == -2, son_kac_sinyal)
-
 
 def build_veri_baglami(hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_durum, finansal_durum,
                         momentum_10g, fark, divergence, hedef_fiyat, stop_loss,
                         fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka,
-                        supertrend_perf=None):
+                        sinyal_karsilastirma=None):
     satirlar = [
         f"Hisse: {hisse_adi}",
         f"Güncel Fiyat: {son_s['Close']:.2f} TL",
@@ -564,12 +597,14 @@ def build_veri_baglami(hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_dur
     satirlar.append(f"Özsermaye Kârlılığı (ROE): {fmt(roe * 100 if roe is not None else None, '%')}")
     satirlar.append(f"Finansal Sağlık: {finansal_durum}")
     satirlar.append(f"Sistemin kural tabanlı kararı: {karar} (Güven Skoru %{int(skor)})")
-    if supertrend_perf:
-        satirlar.append(
-            f"Geçmiş SuperTrend Sinyal Performansı (son {supertrend_perf['toplam_sinyal']} AL sinyali): "
-            f"Kazanma oranı %{supertrend_perf['kazanma_orani']:.0f}, ortalama getiri %{supertrend_perf['ortalama_getiri']:+.2f}"
-            f"{' (son sinyal hâlâ açık pozisyonda)' if supertrend_perf['acik_pozisyon_var'] else ''}"
-        )
+    if sinyal_karsilastirma:
+        satirlar.append("Geçmiş Sinyal Sistemi Performans Karşılaştırması (son sinyaller):")
+        for satir in sinyal_karsilastirma:
+            satirlar.append(
+                f"  * {satir['Sistem']}: {satir['Son Sinyal Sayısı']} sinyal, "
+                f"kazanma oranı {satir['Kazanma Oranı']}, ortalama getiri {satir['Ortalama Getiri']}"
+                f"{' (son sinyal hâlâ açık pozisyonda)' if satir['Açık Pozisyon'] == 'Evet' else ''}"
+            )
     if is_banka:
         satirlar.append("NOT: Bu bir banka hissesidir; Cari Oran ve Net Borç/FAVÖK gibi sanayi rasyoları burada geçersizdir, sadece F/K, PD/DD ve ROE üzerinden bankacılık sağlığını yorumla.")
     return "\n".join(f"- {s}" for s in satirlar)
@@ -656,7 +691,7 @@ if bugun_sinyal_olanlar:
     """, unsafe_allow_html=True)
 
 if tarama_satirlari:
-    st.dataframe(pd.DataFrame(tarama_satirlari), use_container_width=True, hide_index=True)
+    st.markdown(html_tablo(tarama_satirlari), unsafe_allow_html=True)
 
 st.markdown("---")
 
@@ -735,7 +770,7 @@ else:
         })
 
     if pf_satirlari:
-        st.dataframe(pd.DataFrame(pf_satirlari), use_container_width=True, hide_index=True)
+        st.markdown(html_tablo(pf_satirlari), unsafe_allow_html=True)
 
         toplam_kz = toplam_deger - toplam_maliyet
         toplam_kz_yuzde = (toplam_kz / toplam_maliyet * 100) if toplam_maliyet else 0
@@ -757,7 +792,7 @@ with col_left:
     yf_ticker = secilen_ticker.replace('_', '.')
 
     df_secilen = load_data(secilen_ticker)
-    supertrend_perf = None
+    karsilastirma_satirlari = []
 
     if df_secilen is not None and not df_secilen.empty:
         son_hacim = df_secilen['Volume'].iloc[-1]
@@ -924,8 +959,6 @@ with col_left:
         fig.update_yaxes(gridcolor=GRID_COLOR)
         st.plotly_chart(fig, use_container_width=True)
 
-        supertrend_perf = supertrend_performansi(df_secilen)
-
         sinyal_sistemleri = [
             ('SuperTrend', df_secilen.get('Sinyal_Degisim') == 2, df_secilen.get('Sinyal_Degisim') == -2),
             ('Optimize', df_secilen.get('Optimize_AL', pd.Series(False, index=df_secilen.index)).astype(bool),
@@ -948,7 +981,7 @@ with col_left:
 
         if karsilastirma_satirlari:
             st.markdown("<div class='fintables-header'>📈 Sinyal Performans Karşılaştırması (Geçmiş)</div>", unsafe_allow_html=True)
-            st.dataframe(pd.DataFrame(karsilastirma_satirlari), use_container_width=True, hide_index=True)
+            st.markdown(html_tablo(karsilastirma_satirlari), unsafe_allow_html=True)
             st.caption("⚠️ Geçmiş sinyal performansı gelecekteki sonuçların garantisi değildir.")
 
 with col_right:
@@ -1027,7 +1060,7 @@ with col_right:
             secilen_hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_durum, finansal_durum,
             momentum_10g, fark, divergence, hedef_fiyat, stop_loss,
             fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka,
-            supertrend_perf
+            karsilastirma_satirlari
         )
 
     rapor_key = f"gemini_rapor_{secilen_ticker}"
