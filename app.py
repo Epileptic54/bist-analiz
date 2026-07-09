@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import time
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -145,15 +146,26 @@ with buton_col:
     st.write("")
     if st.button("🔄 Verileri Yenile", use_container_width=True):
         with st.spinner("Piyasa verileri güncelleniyor..."):
+            basarisiz_hisseler = []
             conn = sqlite3.connect(data_engine.DB_PATH)
             try:
-                for ticker in data_engine.TICKERS:
-                    taze_df = data_engine.fetch_data(ticker)
+                for i, ticker in enumerate(data_engine.TICKERS):
+                    if i > 0:
+                        time.sleep(1.5)
+                    try:
+                        taze_df = data_engine.fetch_data(ticker)
+                    except Exception:
+                        basarisiz_hisseler.append(ticker)
+                        continue
                     if not taze_df.empty:
                         taze_df = data_engine.add_indicators(taze_df)
                         data_engine.save_to_db(taze_df, ticker, conn)
+                    else:
+                        basarisiz_hisseler.append(ticker)
             finally:
                 conn.close()
+        if basarisiz_hisseler:
+            st.warning(f"Şu hisseler için veri çekilemedi (Yahoo Finance hız sınırı/ağ hatası olabilir, birazdan tekrar dene): {', '.join(basarisiz_hisseler)}")
         st.cache_data.clear()
         for key in list(st.session_state.keys()):
             if key.startswith(("gemini_", "chat_", "messages_")):
@@ -169,7 +181,12 @@ TEXT_COLOR = "#d1d4dc"
 
 def _tabloyu_olustur(ticker):
     yf_symbol = ticker.replace('_', '.')
-    taze_df = data_engine.fetch_data(yf_symbol)
+    time.sleep(1)
+    try:
+        taze_df = data_engine.fetch_data(yf_symbol)
+    except Exception as e:
+        st.warning(f"{yf_symbol} için veri Yahoo Finance'ten çekilemedi (hız sınırı ya da geçici ağ hatası olabilir): {e}")
+        return False
     if taze_df.empty:
         return False
     taze_df = data_engine.add_indicators(taze_df)
