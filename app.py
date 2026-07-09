@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from google import genai
 from groq import Groq
 from plotly.subplots import make_subplots
+from tavily import TavilyClient
 
 import data_engine
 
@@ -31,6 +32,8 @@ GEMINI_MODEL = "gemini-2.5-flash-lite"
 
 GROQ_API_KEY = _get_secret("GROQ_API_KEY")
 GROQ_MODEL = "llama-3.3-70b-versatile"
+
+TAVILY_API_KEY = _get_secret("TAVILY_API_KEY")
 
 GADDAR_PERSONA = (
     "Sen 25 yillik tecrubeye sahip, gaddar, asiri mukemmeliyetci, lafini hic esirgemeyen, "
@@ -70,7 +73,28 @@ GROQ_ARAC_TANIMLARI = [
                 "required": ["metrik"],
             },
         },
-    }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_arama_yap",
+            "description": (
+                "İnternette güncel bilgi arar (haberler, KAP bildirimleri, sektör/şirket gelişmeleri, "
+                "genel piyasa bilgisi vb.). Kullanıcı sitedeki sabit veri setinde olmayan, güncel veya "
+                "genel bir şey sorduğunda bu aracı çağır; tahmin etme."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sorgu": {
+                        "type": "string",
+                        "description": "Aranacak arama sorgusu (Türkçe veya İngilizce olabilir)",
+                    },
+                },
+                "required": ["sorgu"],
+            },
+        },
+    },
 ]
 
 
@@ -89,6 +113,28 @@ def hisse_istatistigi_hesapla(df, metrik, gun_sayisi=30):
     if metrik == "volatilite_yuzde":
         return f"%{veri['Close'].pct_change().std() * 100:.2f} günlük volatilite ({gun_sayisi} günlük)"
     return "Bilinmeyen metrik."
+
+
+@st.cache_resource
+def get_tavily_client():
+    if not TAVILY_API_KEY or "buraya" in TAVILY_API_KEY:
+        return None
+    return TavilyClient(api_key=TAVILY_API_KEY)
+
+
+def web_arama_yap(sorgu):
+    tavily_client = get_tavily_client()
+    if tavily_client is None:
+        return "Web arama aracı şu anda yapılandırılmamış (TAVILY_API_KEY eksik)."
+    try:
+        sonuc = tavily_client.search(query=sorgu, max_results=4)
+        parcalar = [
+            f"- {r.get('title')}: {r.get('content', '')[:300]} (Kaynak: {r.get('url')})"
+            for r in sonuc.get("results", [])[:4]
+        ]
+        return "\n".join(parcalar) if parcalar else "Arama sonucu bulunamadı."
+    except Exception as e:
+        return f"Web araması başarısız oldu: {e}"
 
 
 @st.cache_resource
@@ -730,7 +776,9 @@ Veri Bağlamı:
                             f"{GADDAR_PERSONA}\n\nGüncel Veri Bağlamı:\n{veri_baglami}\n\n"
                             "Yukarıdaki bağlamda olmayan ortalama hacim, ortalama fiyat, en yüksek/düşük "
                             "seviye veya volatilite gibi hesaplanabilir bir şey sorulursa ASLA tahmin etme; "
-                            "hisse_istatistigi_hesapla aracını çağırarak gerçek veriden hesapla."
+                            "hisse_istatistigi_hesapla aracını çağırarak gerçek veriden hesapla. Güncel haber, "
+                            "KAP bildirimi, sektör bilgisi veya sitedeki veri setinde hiç olmayan genel bir şey "
+                            "sorulursa web_arama_yap aracını çağırarak internetten araştır."
                         )
                         groq_mesajlari = [{"role": "system", "content": sistem_mesaji}] + st.session_state[messages_key]
 
@@ -749,9 +797,12 @@ Veri Bağlamı:
                             groq_mesajlari.append(asistan_mesaji)
                             for tool_call in asistan_mesaji.tool_calls:
                                 args = json.loads(tool_call.function.arguments or "{}")
-                                sonuc = hisse_istatistigi_hesapla(
-                                    df_secilen, args.get("metrik", ""), args.get("gun_sayisi", 30)
-                                )
+                                if tool_call.function.name == "web_arama_yap":
+                                    sonuc = web_arama_yap(args.get("sorgu", ""))
+                                else:
+                                    sonuc = hisse_istatistigi_hesapla(
+                                        df_secilen, args.get("metrik", ""), args.get("gun_sayisi", 30)
+                                    )
                                 groq_mesajlari.append({
                                     "role": "tool",
                                     "tool_call_id": tool_call.id,
