@@ -1274,7 +1274,10 @@ if portfoy:
                 'Ort. Maliyet': f"{maliyet:.2f} TL",
                 'Güncel Fiyat': f"{guncel_fiyat:.2f} TL",
                 'Toplam Değer': f"{pozisyon_degeri:,.2f} TL".replace(',', '.'),
-                'Kâr/Zarar': f"{kar_zarar:+,.2f} TL ({kar_zarar_yuzde:+.1f}%)".replace(',', '.'),
+                'Kâr/Zarar': (
+                    f"<span style='color:{RENK_IYI if kar_zarar >= 0 else RENK_KRITIK};'>"
+                    f"{kar_zarar:+,.2f} TL ({kar_zarar_yuzde:+.1f}%)</span>"
+                ).replace(',', '.'),
             })
 
 yogunlasma_uyarilari = _portfoy_risk_uyarilari(pf_ham_veri, toplam_deger)
@@ -1535,9 +1538,11 @@ with tab3:
 
             # 3. RSI ve Stokastik RSI Paneli
             if 'RSI_14' in df_gorunum.columns:
+                fig.add_hrect(y0=70, y1=100, fillcolor=RENK_KRITIK, opacity=0.06, line_width=0, row=3, col=1)
+                fig.add_hrect(y0=0, y1=30, fillcolor=RENK_IYI, opacity=0.06, line_width=0, row=3, col=1)
                 fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum['RSI_14'], name='RSI 14', legend='legend3', line=dict(color='#a855f7', width=1.3)), row=3, col=1)
-                fig.add_shape(type="line", x0=df_gorunum['Date'].min(), y0=70, x1=df_gorunum['Date'].max(), y1=70, line=dict(color="#ef4444", dash="dash", width=1), row=3, col=1)
-                fig.add_shape(type="line", x0=df_gorunum['Date'].min(), y0=30, x1=df_gorunum['Date'].max(), y1=30, line=dict(color="#22c55e", dash="dash", width=1), row=3, col=1)
+                fig.add_shape(type="line", x0=df_gorunum['Date'].min(), y0=70, x1=df_gorunum['Date'].max(), y1=70, line=dict(color=RENK_KRITIK, dash="dash", width=1), row=3, col=1)
+                fig.add_shape(type="line", x0=df_gorunum['Date'].min(), y0=30, x1=df_gorunum['Date'].max(), y1=30, line=dict(color=RENK_IYI, dash="dash", width=1), row=3, col=1)
 
             legend_style = dict(orientation='h', bgcolor='rgba(0,0,0,0)', bordercolor='rgba(0,0,0,0)', font=dict(size=9, color=TEXT_COLOR), tracegroupgap=6)
 
@@ -1604,19 +1609,32 @@ with tab3:
                     ozet_vade = _istatistik_ozeti(islemler_vade)
                     ozet_dd = _istatistik_ozeti(islemler_dd)
 
+                    def _stat_kutusu(label, deger_str, renk=None):
+                        renk_stili = f"color:{renk};" if renk else ""
+                        return (
+                            f"<div style='padding:4px 0;'>"
+                            f"<div style='font-size:0.75em; opacity:0.65; text-transform:uppercase;'>{label}</div>"
+                            f"<div style='font-size:1.5em; font-weight:600; {renk_stili}'>{deger_str}</div>"
+                            f"</div>"
+                        )
+
                     oran_cols = st.columns(6)
                     with oran_cols[0]:
-                        st.metric("Vade İşlem", ozet_vade['toplam_islem'] if ozet_vade else 0)
+                        st.markdown(_stat_kutusu("Vade İşlem", ozet_vade['toplam_islem'] if ozet_vade else "—"), unsafe_allow_html=True)
                     with oran_cols[1]:
-                        st.metric("Vade Kazanma %", f"{ozet_vade['kazanma_orani']:.0f}%" if ozet_vade else "—")
+                        renk = (RENK_IYI if ozet_vade['kazanma_orani'] >= 50 else RENK_KRITIK) if ozet_vade else None
+                        st.markdown(_stat_kutusu("Vade Kazanma %", f"{ozet_vade['kazanma_orani']:.0f}%" if ozet_vade else "—", renk), unsafe_allow_html=True)
                     with oran_cols[2]:
-                        st.metric("Vade Ort. Getiri", f"{ozet_vade['ortalama_getiri']:+.2f}%" if ozet_vade else "—")
+                        renk = (RENK_IYI if ozet_vade['ortalama_getiri'] >= 0 else RENK_KRITIK) if ozet_vade else None
+                        st.markdown(_stat_kutusu("Vade Ort. Getiri", f"{ozet_vade['ortalama_getiri']:+.2f}%" if ozet_vade else "—", renk), unsafe_allow_html=True)
                     with oran_cols[3]:
-                        st.metric("D/D İşlem", ozet_dd['toplam_islem'] if ozet_dd else 0)
+                        st.markdown(_stat_kutusu("D/D İşlem", ozet_dd['toplam_islem'] if ozet_dd else "—"), unsafe_allow_html=True)
                     with oran_cols[4]:
-                        st.metric("D/D Kazanma %", f"{ozet_dd['kazanma_orani']:.0f}%" if ozet_dd else "—")
+                        renk = (RENK_IYI if ozet_dd['kazanma_orani'] >= 50 else RENK_KRITIK) if ozet_dd else None
+                        st.markdown(_stat_kutusu("D/D Kazanma %", f"{ozet_dd['kazanma_orani']:.0f}%" if ozet_dd else "—", renk), unsafe_allow_html=True)
                     with oran_cols[5]:
-                        st.metric("D/D Ort. Getiri", f"{ozet_dd['ortalama_getiri']:+.2f}%" if ozet_dd else "—")
+                        renk = (RENK_IYI if ozet_dd['ortalama_getiri'] >= 0 else RENK_KRITIK) if ozet_dd else None
+                        st.markdown(_stat_kutusu("D/D Ort. Getiri", f"{ozet_dd['ortalama_getiri']:+.2f}%" if ozet_dd else "—", renk), unsafe_allow_html=True)
 
                     bt_fig = go.Figure()
                     bt_fig.add_trace(go.Candlestick(
