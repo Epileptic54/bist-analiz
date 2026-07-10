@@ -3,7 +3,6 @@ pandas==3.0.3
 plotly==6.8.0
 yfinance==1.5.1
 python-dotenv==1.2.2
-google-genai==2.10.0
 groq==1.5.0
 tavily-python==0.7.26
 anthropic==0.116.0

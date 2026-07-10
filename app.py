@@ -11,7 +11,6 @@ import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 from dotenv import load_dotenv
-from google import genai
 from groq import Groq
 from plotly.subplots import make_subplots
 from tavily import TavilyClient
@@ -29,9 +28,6 @@ def _get_secret(key):
         pass
     return os.getenv(key)
 
-
-GEMINI_API_KEY = _get_secret("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-2.5-flash-lite"
 
 GROQ_API_KEY = _get_secret("GROQ_API_KEY")
 GROQ_MODEL = "openai/gpt-oss-120b"
@@ -174,6 +170,39 @@ GROQ_ARAC_TANIMLARI = [
     {
         "type": "function",
         "function": {
+            "name": "fibonacci_hesapla",
+            "description": (
+                "Seçili hissenin GERÇEK fiyat verisinden Fibonacci geri çekilme seviyelerini hesaplar "
+                "(destek/direnç ile aynı swing high/low noktalarına dayanır). Kullanıcı Fibonacci, geri "
+                "çekilme seviyesi gibi bir şey sorduğunda ASLA tahmin etme; bu aracı çağırarak gerçek veriden hesapla."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "gun_sayisi": {
+                        "type": "integer",
+                        "description": "Kaç günlük veri üzerinden hesaplanacağı (varsayılan 120)",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "vade_analizi_hesapla",
+            "description": (
+                "Seçili hissenin kısa (10 gün), orta (50 gün) ve uzun (200 gün) vadeli trend analizini, "
+                "her vadeyi besleyen ölçütlerin gerçek değerleriyle birlikte döndürür. Kullanıcı kısa/orta/uzun "
+                "vade, trend yönü gibi bir şey sorduğunda bu aracı çağır."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "web_arama_yap",
             "description": (
                 "İnternette güncel bilgi arar (haberler, KAP bildirimleri, sektör/şirket gelişmeleri, "
@@ -256,6 +285,40 @@ def destek_direnc_hesapla(df, gun_sayisi=120):
     )
     satirlar.append(f"Analiz Penceresi: Son {gun_sayisi_eff} gün, yerel tepe/dip (swing high/low) yöntemiyle hesaplandı.")
     return "\n".join(satirlar)
+
+
+def fibonacci_hesapla(df, gun_sayisi=120):
+    fib = _fibonacci_seviyeleri(df, gun_sayisi)
+    if not fib:
+        return "Fibonacci seviyeleri hesaplanamadı (yetersiz veri)."
+    seviyeler_metni = ", ".join(f"%{o * 100:.1f}: {v:.2f} TL" for o, v in sorted(fib['seviyeler'].items()))
+    return f"Fibonacci geri çekilme seviyeleri ({fib['yon']} hareket): {seviyeler_metni}"
+
+
+def vade_analizi_metni(zaman_dilimi):
+    if not zaman_dilimi:
+        return "Vade analizi hesaplanamadı."
+    parcalar = []
+    for etiket, veri in [
+        ("Kısa Vade (10 gün)", zaman_dilimi['kisa_vade']),
+        ("Orta Vade (50 gün)", zaman_dilimi['orta_vade']),
+        ("Uzun Vade (200 gün)", zaman_dilimi['uzun_vade']),
+    ]:
+        bilesen_metni = "; ".join(f"{b['ad']}: {b['deger']} ({b['yon']})" for b in veri.get('bilesenler', []))
+        parcalar.append(f"{etiket}: {veri['yon'] or 'Belirlenemedi'} — {bilesen_metni}")
+    return "\n".join(parcalar)
+
+
+def _arac_calistir(arac_adi, args, df_secilen, zaman_dilimi):
+    if arac_adi == "web_arama_yap":
+        return web_arama_yap(args.get("sorgu", ""))
+    if arac_adi == "destek_direnc_hesapla":
+        return destek_direnc_hesapla(df_secilen, args.get("gun_sayisi", 120))
+    if arac_adi == "fibonacci_hesapla":
+        return fibonacci_hesapla(df_secilen, args.get("gun_sayisi", 120))
+    if arac_adi == "vade_analizi_hesapla":
+        return vade_analizi_metni(zaman_dilimi)
+    return hisse_istatistigi_hesapla(df_secilen, args.get("metrik", ""), args.get("gun_sayisi", 30))
 
 
 def _hacim_teyidi(df, gun=5, referans=20):
@@ -423,13 +486,6 @@ def web_arama_yap(sorgu):
         return "\n".join(parcalar) if parcalar else "Arama sonucu bulunamadı."
     except Exception as e:
         return f"Web araması başarısız oldu: {e}"
-
-
-@st.cache_resource
-def get_gemini_client():
-    if not GEMINI_API_KEY or "buraya" in GEMINI_API_KEY:
-        return None
-    return genai.Client(api_key=GEMINI_API_KEY)
 
 
 @st.cache_resource
@@ -754,7 +810,7 @@ with buton_col:
             st.warning(f"Şu hisseler için veri çekilemedi (Yahoo Finance hız sınırı/ağ hatası olabilir, birazdan tekrar dene): {', '.join(basarisiz_hisseler)}")
         load_data.clear()
         for key in list(st.session_state.keys()):
-            if key.startswith(("gemini_", "chat_", "messages_", "claude_")):
+            if key.startswith(("chat_", "messages_", "claude_")):
                 del st.session_state[key]
         st.rerun()
 
@@ -1433,15 +1489,12 @@ with tab3:
 
         finansal_risk = (cari_oran is not None and cari_oran < 1) or (net_borc_favok is not None and net_borc_favok > 4)
 
-        gemini_client = get_gemini_client()
         veri_baglami = None
         veri_baglami_claude = None
         karar = skor = ema_durum = rsi_durum = st_durum = finansal_durum = None
         rsi_deger = None
         guncel_fiyat_ozet = None
         canli_saat_secilen = None
-
-        st.markdown("<div class='fintables-header'>🧠 GEMİNİ DERİN ANALİZ RAPORU</div>", unsafe_allow_html=True)
 
         if df_secilen is not None and not df_secilen.empty:
             son_s = df_secilen.iloc[-1].copy()
@@ -1609,44 +1662,8 @@ with tab3:
             else:
                 st.info("Bu hisse için veri yüklenemedi.")
 
-        rapor_key = f"gemini_rapor_{secilen_ticker}"
-
-        if gemini_client is not None and veri_baglami is not None:
-            baslat_tiklandi = st.button("🧠 Gemini Analizini Başlat", key=f"rapor_baslat_{secilen_ticker}")
-            if baslat_tiklandi:
-                rapor_prompt = f"""{ANALIST_PERSONA}
-
-    Aşağıdaki güncel piyasa verilerine dayanarak {secilen_hisse_adi} hissesi için TÜRKÇE, uzun ve derinlemesine bir analiz raporu yaz. Rapor TAM OLARAK şu 5 başlığı bu sırayla, aynen bu şekilde (emojili ve iki nokta üst üste ile) kullanmalı; her başlığın altında en az 3-4 cümlelik, veriye dayalı, doğrudan ve sert bir analiz olmalı:
-
-    📊 Trend ve İvme Analizi:
-    🎯 Osilatör ve Güç Kontrolü:
-    💸 Temel Analiz ve Değerleme Özeti:
-    🗺️ Yol Haritası (Destek/Direnç ve Kırılım Noktaları):
-    🚨 Son Karar ve Risk Alarmı:
-
-    Kurallar:
-    - "Temel Analiz ve Değerleme Özeti" bölümünde, veri bağlamında Cari Oran veya Net Borç/FAVÖK yoksa bunlardan hiç bahsetme; sadece F/K, PD/DD ve ROE üzerinden yorum yap.
-    - "Yol Haritası" bölümünde veri bağlamındaki Direnç ve Destek Seviyelerini birebir kullan: en yakın direncin üzerinde kırılım olursa fiyatın hangi seviyeye (bir sonraki dirence) doğru hareket edebileceğini, en yakın desteğin altında kırılım olursa hangi seviyeye kadar sarkabileceğini somut TL rakamlarıyla söyle. Uydurma seviye kullanma, sadece verilenleri kullan.
-    - "Son Karar ve Risk Alarmı" bölümünde asla yuvarlak, muğlak cümle kurma; riskleri ve tuzakları doğrudan söyle.
-    - Kesin "al/sat" emri verme ama net bir yönelim ve gerekçe sun.
-    - Her başlığın altında EN FAZLA 2-3 kısa cümle yaz. Uzun, süslü, edebi cümle kurma; bir çalışanın yöneticisine sözlü rapor verir gibi kısa ve net konuş. Sıfat yığma, benzetme yapma, doğrudan olguyu ve sonucu söyle.
-
-    Veri Bağlamı:
-    {veri_baglami}
-    """
-                with st.spinner("Gemini derinlemesine analiz ediyor..."):
-                    try:
-                        response = gemini_client.models.generate_content(model=GEMINI_MODEL, contents=rapor_prompt)
-                        st.session_state[rapor_key] = response.text
-                    except Exception as e:
-                        st.session_state[rapor_key] = None
-                        st.error(f"Gemini isteği başarısız oldu: {e}")
-
-            if st.session_state.get(rapor_key):
-                with st.container(border=True):
-                    st.markdown(st.session_state[rapor_key])
-        elif veri_baglami is not None:
-            st.info("Gemini derin analiz raporu için proje kök dizinindeki .env dosyasına GEMINI_API_KEY eklemen gerekiyor. Aşağıda temel kural tabanlı özet gösteriliyor.")
+        st.markdown("<div class='fintables-header'>⚡ Hızlı Özet (Kural Tabanlı)</div>", unsafe_allow_html=True)
+        if veri_baglami is not None:
             with st.container(border=True):
                 st.markdown(
                     f"**Strateji:** {karar}  \n"
@@ -1716,78 +1733,93 @@ with tab3:
                     with st.chat_message("user"):
                         st.markdown(kullanici_sorusu)
                     with st.chat_message("assistant"):
-                        with st.spinner("Analiz ediliyor..."):
-                            try:
-                                sistem_mesaji = (
-                                    f"{ANALIST_PERSONA}\n\nGüncel Veri Bağlamı:\n{veri_baglami}\n\n"
-                                    "Yukarıdaki bağlamda olmayan ortalama hacim, ortalama fiyat, en yüksek/düşük "
-                                    "seviye veya volatilite gibi hesaplanabilir bir şey sorulursa ASLA tahmin etme; "
-                                    "hisse_istatistigi_hesapla aracını çağırarak gerçek veriden hesapla. Destek, direnç "
-                                    "veya kritik teknik seviye sorulursa destek_direnc_hesapla aracını çağır. Güncel haber, "
-                                    "KAP bildirimi, sektör bilgisi veya sitedeki veri setinde hiç olmayan genel bir şey "
-                                    "sorulursa web_arama_yap aracını çağırarak internetten araştır."
+                        placeholder = st.empty()
+                        try:
+                            sistem_mesaji = (
+                                f"{ANALIST_PERSONA}\n\nGüncel Veri Bağlamı:\n{veri_baglami}\n\n"
+                                "Yukarıdaki bağlamda olmayan ortalama hacim, ortalama fiyat, en yüksek/düşük "
+                                "seviye veya volatilite gibi hesaplanabilir bir şey sorulursa ASLA tahmin etme; "
+                                "hisse_istatistigi_hesapla aracını çağırarak gerçek veriden hesapla. Destek, direnç "
+                                "veya kritik teknik seviye sorulursa destek_direnc_hesapla, Fibonacci seviyesi "
+                                "sorulursa fibonacci_hesapla, kısa/orta/uzun vade trend sorulursa vade_analizi_hesapla "
+                                "aracını çağır. Güncel haber, KAP bildirimi, sektör bilgisi veya sitedeki veri setinde "
+                                "hiç olmayan genel bir şey sorulursa web_arama_yap aracını çağırarak internetten araştır."
+                            )
+                            gonderilecek_gecmis = st.session_state[messages_key][-12:]
+                            groq_mesajlari = [{"role": "system", "content": sistem_mesaji}] + gonderilecek_gecmis
+
+                            kullanilan_araclar = []
+                            icerik = ""
+                            for _ in range(3):
+                                stream = groq_client.chat.completions.create(
+                                    model=GROQ_MODEL,
+                                    messages=groq_mesajlari,
+                                    tools=GROQ_ARAC_TANIMLARI,
+                                    tool_choice="auto",
+                                    stream=True,
                                 )
-                                groq_mesajlari = [{"role": "system", "content": sistem_mesaji}] + st.session_state[messages_key]
+                                icerik = ""
+                                arac_cagrilari = {}
+                                for chunk in stream:
+                                    delta = chunk.choices[0].delta
+                                    if delta.content:
+                                        icerik += delta.content
+                                        placeholder.markdown(icerik + "▌")
+                                    if delta.tool_calls:
+                                        for tc in delta.tool_calls:
+                                            slot = arac_cagrilari.setdefault(tc.index, {"id": None, "name": "", "arguments": ""})
+                                            if tc.id:
+                                                slot["id"] = tc.id
+                                            if tc.function and tc.function.name:
+                                                slot["name"] += tc.function.name
+                                            if tc.function and tc.function.arguments:
+                                                slot["arguments"] += tc.function.arguments
 
-                                asistan_mesaji = None
-                                for _ in range(3):
-                                    completion = groq_client.chat.completions.create(
-                                        model=GROQ_MODEL,
-                                        messages=groq_mesajlari,
-                                        tools=GROQ_ARAC_TANIMLARI,
-                                        tool_choice="auto",
-                                    )
-                                    asistan_mesaji = completion.choices[0].message
-
-                                    if asistan_mesaji.tool_calls:
-                                        groq_mesajlari.append(asistan_mesaji)
-                                        for tool_call in asistan_mesaji.tool_calls:
-                                            args = json.loads(tool_call.function.arguments or "{}")
-                                            if tool_call.function.name == "web_arama_yap":
-                                                sonuc = web_arama_yap(args.get("sorgu", ""))
-                                            elif tool_call.function.name == "destek_direnc_hesapla":
-                                                sonuc = destek_direnc_hesapla(df_secilen, args.get("gun_sayisi", 120))
-                                            else:
-                                                sonuc = hisse_istatistigi_hesapla(
-                                                    df_secilen, args.get("metrik", ""), args.get("gun_sayisi", 30)
-                                                )
-                                            groq_mesajlari.append({
-                                                "role": "tool",
-                                                "tool_call_id": tool_call.id,
-                                                "content": sonuc,
-                                            })
-                                        continue
-
-                                    # Bazı modeller ara sıra gerçek tool_calls yerine fonksiyon çağrısını
-                                    # düz metin olarak sızdırıyor (<function=...>...</function>). Bunu
-                                    # yakalayıp kullanıcıya çiğ metin göstermeden aracı biz çalıştırıyoruz.
-                                    sizinti = _sizinti_arac_cagrisini_yakala(asistan_mesaji.content)
-                                    if sizinti:
-                                        arac_adi, args = sizinti
-                                        if arac_adi == "web_arama_yap":
-                                            sonuc = web_arama_yap(args.get("sorgu", ""))
-                                        elif arac_adi == "destek_direnc_hesapla":
-                                            sonuc = destek_direnc_hesapla(df_secilen, args.get("gun_sayisi", 120))
-                                        else:
-                                            sonuc = hisse_istatistigi_hesapla(
-                                                df_secilen, args.get("metrik", ""), args.get("gun_sayisi", 30)
-                                            )
-                                        groq_mesajlari.append({"role": "assistant", "content": asistan_mesaji.content})
+                                if arac_cagrilari:
+                                    tool_calls_list = [
+                                        {"id": v["id"], "type": "function",
+                                         "function": {"name": v["name"], "arguments": v["arguments"]}}
+                                        for v in arac_cagrilari.values()
+                                    ]
+                                    groq_mesajlari.append({
+                                        "role": "assistant", "content": icerik or None, "tool_calls": tool_calls_list,
+                                    })
+                                    for tc in tool_calls_list:
+                                        arac_adi = tc["function"]["name"]
+                                        args = json.loads(tc["function"]["arguments"] or "{}")
+                                        kullanilan_araclar.append(arac_adi)
+                                        sonuc = _arac_calistir(arac_adi, args, df_secilen, zaman_dilimi)
                                         groq_mesajlari.append({
-                                            "role": "user",
-                                            "content": (
-                                                f"Araç sonucu: {sonuc}\n\nBuna dayanarak soruyu normal, düz metinle "
-                                                "cevapla; fonksiyon çağrısı söz dizimi (<function=...>) kullanma."
-                                            ),
+                                            "role": "tool", "tool_call_id": tc["id"], "content": sonuc,
                                         })
-                                        continue
+                                    continue
 
-                                    break
+                                # Bazı modeller ara sıra gerçek tool_calls yerine fonksiyon çağrısını
+                                # düz metin olarak sızdırıyor (<function=...>...</function>). Bunu
+                                # yakalayıp kullanıcıya çiğ metin göstermeden aracı biz çalıştırıyoruz.
+                                sizinti = _sizinti_arac_cagrisini_yakala(icerik)
+                                if sizinti:
+                                    arac_adi, args = sizinti
+                                    kullanilan_araclar.append(arac_adi)
+                                    sonuc = _arac_calistir(arac_adi, args, df_secilen, zaman_dilimi)
+                                    groq_mesajlari.append({"role": "assistant", "content": icerik})
+                                    groq_mesajlari.append({
+                                        "role": "user",
+                                        "content": (
+                                            f"Araç sonucu: {sonuc}\n\nBuna dayanarak soruyu normal, düz metinle "
+                                            "cevapla; fonksiyon çağrısı söz dizimi (<function=...>) kullanma."
+                                        ),
+                                    })
+                                    continue
 
-                                cevap_metni = asistan_mesaji.content or "Bir cevap üretemedim."
-                                st.markdown(cevap_metni)
-                                st.session_state[messages_key].append({"role": "assistant", "content": cevap_metni})
-                            except Exception as e:
-                                st.error(f"Groq isteği başarısız oldu: {e}")
+                                break
+
+                            cevap_metni = icerik or "Bir cevap üretemedim."
+                            placeholder.markdown(cevap_metni)
+                            if kullanilan_araclar:
+                                st.caption(f"🔧 Kullanılan araçlar: {', '.join(kullanilan_araclar)}")
+                            st.session_state[messages_key].append({"role": "assistant", "content": cevap_metni})
+                        except Exception as e:
+                            st.error(f"Groq isteği başarısız oldu: {e}")
         else:
             st.info("Canlı soru-cevap için proje kök dizinindeki .env dosyasına GROQ_API_KEY eklemen gerekiyor.")
