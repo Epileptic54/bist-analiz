@@ -738,6 +738,21 @@ st.markdown("""
         font-weight: 500;
         color: #d1d4dc;
     }
+    /* Durum varyantlari: renk .risk-alarm ile aynı kutuda, sadece kenarlik/arka plan degisiyor.
+       Boylece Python tarafinda her seferinde rgba() string'i kurmak yerine tek bir class eklemek yeterli. */
+    .risk-alarm.alarm-iyi {
+        background: rgba(34, 197, 94, 0.12);
+        border-color: #22c55e;
+    }
+    .risk-alarm.alarm-uyari {
+        background: rgba(234, 179, 8, 0.12);
+        border-color: #eab308;
+    }
+    .risk-alarm.alarm-notr {
+        background: rgba(255, 255, 255, 0.03);
+        border-color: #2a2e39;
+        font-weight: 400;
+    }
     .grid-table {
         width: 100%;
         border-collapse: collapse;
@@ -849,6 +864,12 @@ with st.expander("⚙️ Watchlist Yönetimi"):
 CHART_BG = "#131722"
 GRID_COLOR = "#2a2e39"
 TEXT_COLOR = "#d1d4dc"
+
+# Durum renkleri - uygulama genelinde TEK kaynak (dogrudan hex yazmak yerine bunlar kullanilir)
+RENK_IYI = "#22c55e"       # yukselis / hedef / basari
+RENK_UYARI = "#eab308"     # dikkat / karisik / notr-uyari
+RENK_KRITIK = "#ef4444"    # dusus / risk / stop-loss ihlali
+RENK_NOTR = GRID_COLOR     # bilgi amacli, alarm olmayan kart kenarligi
 
 
 def fmt(value, suffix='', decimals=2):
@@ -1270,10 +1291,10 @@ with st.container(border=True):
         st.caption("Bugün için özel bir uyarı yok — takip listende yeni sinyal, portföyünde "
                     "stop/hedef ihlali ya da yoğunlaşma riski görünmüyor.")
     else:
-        renk_harita = {"yesil": "#22c55e", "kirmizi": "#ef4444", "sari": "#eab308"}
+        sinif_harita = {"yesil": "alarm-iyi", "kirmizi": "", "sari": "alarm-uyari"}
         for renk, metin in ozet_maddeleri:
             st.markdown(
-                f"<div class='risk-alarm' style='border-color:{renk_harita[renk]};'>{metin}</div>",
+                f"<div class='risk-alarm {sinif_harita[renk]}'>{metin}</div>",
                 unsafe_allow_html=True
             )
 
@@ -1371,10 +1392,8 @@ with tab2:
         for uyari in yogunlasma_uyarilari:
             st.markdown(f"<div class='risk-alarm'>{uyari}</div>", unsafe_allow_html=True)
         for renk, uyari in pf_disiplin_uyarilari:
-            if renk == 'kirmizi':
-                st.markdown(f"<div class='risk-alarm'>{uyari}</div>", unsafe_allow_html=True)
-            else:
-                st.markdown(f"<div class='risk-alarm' style='border-color:#22c55e; background: rgba(34,197,94,0.12);'>{uyari}</div>", unsafe_allow_html=True)
+            sinif = "" if renk == 'kirmizi' else "alarm-iyi"
+            st.markdown(f"<div class='risk-alarm {sinif}'>{uyari}</div>", unsafe_allow_html=True)
         st.caption(f"ℹ️ Disiplin kuralı: tek pozisyon portföyün %35'ini (≈ {toplam_deger * 0.35:,.2f} TL) geçmemesi önerilir.".replace(',', '.'))
 
 with tab3:
@@ -1784,27 +1803,30 @@ with tab3:
                 ]
                 for col, (etiket, veri) in zip(vade_cols, vade_bilgi):
                     with col:
+                        vade_sinif = {"Yükseliş": "alarm-iyi", "Düşüş": "", "Karışık": "alarm-uyari"}
+                        vade_renk = {"Yükseliş": RENK_IYI, "Düşüş": RENK_KRITIK, "Karışık": RENK_UYARI}
                         bilesen_satirlari = ""
                         for b in veri.get('bilesenler', []):
-                            nokta_rengi = "#22c55e" if b['yon'] == "Yükseliş" else "#ef4444"
+                            nokta_rengi = RENK_IYI if b['yon'] == "Yükseliş" else RENK_KRITIK
                             bilesen_satirlari += (
                                 f"<div style='text-align:left; font-size:0.78em; margin-top:4px;'>"
                                 f"<span style='color:{nokta_rengi};'>●</span> "
                                 f"{b['ad']}: <b>{b['deger']}</b> <span style='opacity:0.6;'>({b['veri_tabani']})</span></div>"
                             )
                         if veri['yon']:
-                            renk = "#22c55e" if veri['yon'] == "Yükseliş" else ("#ef4444" if veri['yon'] == "Düşüş" else "#eab308")
+                            sinif = vade_sinif[veri['yon']]
+                            renk = vade_renk[veri['yon']]
                             st.markdown(
-                                f"<div class='risk-alarm' style='border-color:{renk}; background: rgba(0,0,0,0.15);'>"
-                                f"<div style='text-align:center;'><b>{etiket} ({veri['gun']} gün)</b><br>"
+                                f"<div class='risk-alarm {sinif}' style='text-align:center;'>"
+                                f"<b>{etiket} ({veri['gun']} gün)</b><br>"
                                 f"<span style='color:{renk}; font-size:1.15em;'>{veri['yon']}</span><br>"
-                                f"<span style='font-size:0.8em;'>{veri['al_sayisi']}/{veri['toplam']} ölçüt uyumlu</span></div>"
+                                f"<span style='font-size:0.8em;'>{veri['al_sayisi']}/{veri['toplam']} ölçüt uyumlu</span>"
                                 f"{bilesen_satirlari}</div>",
                                 unsafe_allow_html=True
                             )
                         else:
                             st.markdown(
-                                f"<div class='risk-alarm' style='text-align:center;'><b>{etiket} ({veri['gun']} gün)</b><br>Belirlenemedi</div>",
+                                f"<div class='risk-alarm alarm-notr' style='text-align:center;'><b>{etiket} ({veri['gun']} gün)</b><br>Belirlenemedi</div>",
                                 unsafe_allow_html=True
                             )
                 st.caption(
@@ -1817,8 +1839,7 @@ with tab3:
                 celiski = _vade_celiskisi_kontrolu(zaman_dilimi)
                 if celiski:
                     st.markdown(
-                        f"<div class='risk-alarm' style='border-color:#eab308; background: rgba(234,179,8,0.12);'>"
-                        f"⚠️ <b>Vade Çelişkisi:</b> {celiski}</div>",
+                        f"<div class='risk-alarm alarm-uyari'>⚠️ <b>Vade Çelişkisi:</b> {celiski}</div>",
                         unsafe_allow_html=True
                     )
 
@@ -1885,7 +1906,7 @@ with tab3:
 
             st.markdown(f"""
             <div class='risk-alarm'>
-                <b style='color:#ef4444;'>🚨 RİSK ALARMI</b><br>
+                <b style='color:{RENK_KRITIK};'>🚨 RİSK ALARMI</b><br>
                 {'; '.join(risk_nedenleri)}.
             </div>
             """, unsafe_allow_html=True)
