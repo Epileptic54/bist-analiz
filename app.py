@@ -279,23 +279,37 @@ def _hacim_teyidi_etiket(oran):
 
 def _fibonacci_seviyeleri(df, gun_sayisi=120):
     gun_sayisi = max(20, min(int(gun_sayisi or 120), len(df)))
-    veri = df.tail(gun_sayisi)
-    tepe, dip = veri['High'].max(), veri['Low'].min()
+    veri = df.tail(gun_sayisi).reset_index(drop=True)
+
+    high = veri['High'].values
+    low = veri['Low'].values
+
+    tepe_idx = _local_extrema_idx(high, order=3, mode="max")
+    dip_idx = _local_extrema_idx(low, order=3, mode="min")
+
+    if tepe_idx and dip_idx:
+        en_yakin_tepe_idx = tepe_idx[-1]
+        en_yakin_dip_idx = dip_idx[-1]
+        tepe = float(high[en_yakin_tepe_idx])
+        dip = float(low[en_yakin_dip_idx])
+        yon_yukselen = en_yakin_tepe_idx > en_yakin_dip_idx
+    else:
+        tepe, dip = float(veri['High'].max()), float(veri['Low'].min())
+        yon_yukselen = veri['Close'].iloc[-1] >= veri['Close'].iloc[0]
+
     fark = tepe - dip
     if fark <= 0:
         return None
-    yon_yukselen = veri['Close'].iloc[-1] >= veri['Close'].iloc[0]
+
     oranlar = [0.236, 0.382, 0.5, 0.618, 0.786]
     seviyeler = {o: (tepe - fark * o if yon_yukselen else dip + fark * o) for o in oranlar}
     return {'tepe': tepe, 'dip': dip, 'seviyeler': seviyeler, 'yon': 'yukselen' if yon_yukselen else 'dusen'}
 
 
-def _sinyal_konsensusu(ema_durum, rsi_deger, st_durum, di_plus, di_minus):
+def _trend_okumasi(ema_durum, st_durum, di_plus, di_minus):
     puanlar = []
     if ema_durum:
         puanlar.append(1 if ('Üstü' in ema_durum or 'Boğa' in ema_durum) else -1)
-    if rsi_deger is not None:
-        puanlar.append(1 if rsi_deger >= 50 else -1)
     if st_durum:
         puanlar.append(1 if 'AL' in st_durum else -1)
     if di_plus is not None and di_minus is not None:
@@ -311,7 +325,7 @@ def _sinyal_konsensusu(ema_durum, rsi_deger, st_durum, di_plus, di_minus):
     elif al_sayisi < toplam / 2:
         yon = "Düşüş"
     else:
-        yon = "Kararsız"
+        yon = "Karışık"
     return {'al_sayisi': al_sayisi, 'toplam': toplam, 'yon': yon}
 
 
@@ -832,17 +846,18 @@ def build_veri_baglami(hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_dur
                         fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka,
                         sinyal_karsilastirma=None, direnc_seviyeleri=None, destek_seviyeleri=None,
                         adx_deger=None, di_plus=None, di_minus=None, hacim_teyidi_oran=None,
-                        fibonacci=None, konsensus=None, claude_icin_kisitli=False):
+                        fibonacci=None, trend=None, claude_icin_kisitli=False):
     satirlar = [
         f"Hisse: {hisse_adi}",
         f"Güncel Fiyat: {son_s['Close']:.2f} TL",
         f"EMA200 Durumu: {ema_durum}",
         f"RSI (14): {rsi_deger:.2f} ({rsi_durum})",
         f"SuperTrend: {st_durum}",
-        f"Sinyal Konsensüsü: "
-        + (f"{konsensus['al_sayisi']}/{konsensus['toplam']} gösterge {konsensus['yon']} yönlü — "
-           f"göstergeler birbiriyle çelişiyorsa bunu net şekilde belirt, tek bir göstergeye aşırı ağırlık verme."
-           if konsensus else "Belirlenemedi"),
+        f"Trend Okuması: "
+        + (f"{trend['al_sayisi']}/{trend['toplam']} iç ölçüt {trend['yon']} yönlü "
+           "(EMA200/SuperTrend/ADX — üçü de aynı fiyat serisinden türetilen korelasyonlu "
+           "trend ölçütleridir, bağımsız kanıt olarak görme)"
+           if trend else "Belirlenemedi"),
         f"10 Günlük Momentum: {fmt(momentum_10g, '%')}",
         f"BIST100'e Göre Göreli Güç Farkı: {fmt(fark, ' puan') if fark is not None else 'Veri Yok'}",
         f"RSI Uyuşmazlığı: {divergence or 'Yok'}",
@@ -890,184 +905,207 @@ if not hisseler:
     st.warning("Watchlist'in boş. Yukarıdaki '⚙️ Watchlist Yönetimi' kısmından en az bir hisse ekle.")
     st.stop()
 
-# --- PANEL 1: KOMPAKT ÜST METRİKLER ---
-cols = st.columns(len(hisseler))
-for index, (ticker_db, name) in enumerate(hisseler.items()):
-    df = load_data(ticker_db)
-    if df is not None and not df.empty and len(df) >= 2:
-        son_satir = df.iloc[-1]
-        onceki_satir = df.iloc[-2]
-        canli_fiyat, canli_onceki_kapanis = get_canli_fiyat(ticker_db)
-        if canli_fiyat is not None:
-            fiyat = canli_fiyat
-            yuzde_degisim = round(((fiyat - canli_onceki_kapanis) / canli_onceki_kapanis) * 100, 2)
-        else:
-            fiyat = round(son_satir['Close'], 2)
-            yuzde_degisim = round(((fiyat - onceki_satir['Close']) / onceki_satir['Close']) * 100, 2)
+# ============ HESAPLAMA (Günlük Özet ve sekmeler için, sadece bir kez) ============
 
-        prefix = "+" if yuzde_degisim > 0 else ""
-
-        with cols[index]:
-            st.metric(
-                label=f"{name} ({ticker_db.replace('_IS', '')})",
-                value=f"{fiyat} TL",
-                delta=f"{prefix}{yuzde_degisim}%"
-            )
-
-st.markdown("---")
-
-# --- BİLDİRİM + TOPLU TARAMA ---
-st.markdown("<div class='fintables-header'>🔍 Toplu Tarama</div>", unsafe_allow_html=True)
-
+# --- Toplu Tarama hesaplama ---
 tarama_satirlari = []
 bugun_sinyal_olanlar = []
 
-for ticker_db, ad in hisseler.items():
-    df_t = load_data(ticker_db)
-    if df_t is None or df_t.empty or len(df_t) < 2:
-        continue
+with st.spinner("Takip listesi taranıyor..."):
+    for ticker_db, ad in hisseler.items():
+        df_t = load_data(ticker_db)
+        if df_t is None or df_t.empty or len(df_t) < 2:
+            continue
 
-    son = df_t.iloc[-1]
-    onceki = df_t.iloc[-2]
-    canli_fiyat_t, canli_onceki_t = get_canli_fiyat(ticker_db)
-    if canli_fiyat_t is not None:
-        fiyat_gosterim = canli_fiyat_t
-        degisim = ((canli_fiyat_t - canli_onceki_t) / canli_onceki_t) * 100
-    else:
-        fiyat_gosterim = son['Close']
-        degisim = ((son['Close'] - onceki['Close']) / onceki['Close']) * 100
+        son = df_t.iloc[-1]
+        onceki = df_t.iloc[-2]
+        canli_fiyat_t, canli_onceki_t = get_canli_fiyat(ticker_db)
+        if canli_fiyat_t is not None:
+            fiyat_gosterim = canli_fiyat_t
+            degisim = ((canli_fiyat_t - canli_onceki_t) / canli_onceki_t) * 100
+        else:
+            fiyat_gosterim = son['Close']
+            degisim = ((son['Close'] - onceki['Close']) / onceki['Close']) * 100
 
-    st_dir_col = next((c for c in df_t.columns if c.startswith('SUPERTd')), None)
-    st_al_mi = bool(st_dir_col and son[st_dir_col] == 1)
-    st_durum_kisa = "AL 🟢" if st_al_mi else "SAT 🔴"
+        st_dir_col = next((c for c in df_t.columns if c.startswith('SUPERTd')), None)
+        st_al_mi = bool(st_dir_col and son[st_dir_col] == 1)
+        st_durum_kisa = "AL 🟢" if st_al_mi else "SAT 🔴"
 
-    sinyal_bugun = []
-    if son.get('Sinyal_Degisim') == 2:
-        sinyal_bugun.append('SuperTrend AL')
-    elif son.get('Sinyal_Degisim') == -2:
-        sinyal_bugun.append('SuperTrend SAT')
-    if bool(son.get('Optimize_AL', False)):
-        sinyal_bugun.append('Optimize AL')
-    if bool(son.get('Optimize_SAT', False)):
-        sinyal_bugun.append('Optimize SAT')
-    if bool(son.get('Squeeze_AL', False)):
-        sinyal_bugun.append('Squeeze AL')
-    if bool(son.get('Squeeze_SAT', False)):
-        sinyal_bugun.append('Squeeze SAT')
+        sinyal_bugun = []
+        if son.get('Sinyal_Degisim') == 2:
+            sinyal_bugun.append('SuperTrend AL')
+        elif son.get('Sinyal_Degisim') == -2:
+            sinyal_bugun.append('SuperTrend SAT')
+        if bool(son.get('Optimize_AL', False)):
+            sinyal_bugun.append('Optimize AL')
+        if bool(son.get('Optimize_SAT', False)):
+            sinyal_bugun.append('Optimize SAT')
+        if bool(son.get('Squeeze_AL', False)):
+            sinyal_bugun.append('Squeeze AL')
+        if bool(son.get('Squeeze_SAT', False)):
+            sinyal_bugun.append('Squeeze SAT')
 
-    if sinyal_bugun:
-        bugun_sinyal_olanlar.append((ad, sinyal_bugun))
+        if sinyal_bugun:
+            bugun_sinyal_olanlar.append((ad, sinyal_bugun))
 
-    tarama_satirlari.append({
-        'Hisse': ad,
-        'Fiyat': f"{fiyat_gosterim:.2f} TL",
-        'Günlük %': f"{degisim:+.2f}%",
-        'RSI': f"{son['RSI_14']:.1f}",
-        'SuperTrend': st_durum_kisa,
-        'Bugün Sinyal': ', '.join(sinyal_bugun) if sinyal_bugun else '—',
-    })
+        tarama_satirlari.append({
+            'Hisse': ad,
+            'Fiyat': f"{fiyat_gosterim:.2f} TL",
+            'Günlük %': f"{degisim:+.2f}%",
+            'RSI': f"{son['RSI_14']:.1f}",
+            'SuperTrend': st_durum_kisa,
+            'Bugün Sinyal': ', '.join(sinyal_bugun) if sinyal_bugun else '—',
+        })
 
-if bugun_sinyal_olanlar:
-    detaylar = '; '.join(f"{ad}: {', '.join(sinyaller)}" for ad, sinyaller in bugun_sinyal_olanlar)
-    st.markdown(f"""
-    <div class='risk-alarm' style='border-color:#22c55e; background: rgba(34,197,94,0.12);'>
-        <b style='color:#22c55e;'>🔔 BUGÜN YENİ SİNYAL</b><br>
-        {detaylar}
-    </div>
-    """, unsafe_allow_html=True)
-
-if tarama_satirlari:
-    st.markdown(html_tablo(tarama_satirlari), unsafe_allow_html=True)
-
-st.markdown("---")
-
-# --- PORTFÖYÜM ---
-st.markdown("<div class='fintables-header'>💼 PORTFÖYÜM</div>", unsafe_allow_html=True)
-
+# --- Portföy hesaplama ---
 _pf_conn = _watchlist_baglantisi()
 portfoy = data_engine.portfoy_getir(_pf_conn)
 _pf_conn.close()
 
-with st.expander("➕ Pozisyon Ekle / Güncelle"):
-    if hisseler:
-        pf_hisse = st.selectbox("Hisse", list(hisseler.values()), key="pf_hisse_secim")
-        pf_ticker_db = [k for k, v in hisseler.items() if v == pf_hisse][0]
-        mevcut_pozisyon = portfoy.get(pf_ticker_db, {})
+pf_satirlari = []
+pf_ham_veri = []
+pf_disiplin_uyarilari = []
+toplam_maliyet = 0.0
+toplam_deger = 0.0
 
-        pf_col2, pf_col3, pf_col4 = st.columns([1, 1, 1])
-        with pf_col2:
-            pf_adet = st.number_input(
-                "Adet", min_value=0.0, step=1.0,
-                value=float(mevcut_pozisyon.get('adet', 0.0)),
-                key=f"pf_adet_input_{pf_ticker_db}"
-            )
-        with pf_col3:
-            pf_maliyet = st.number_input(
-                "Ort. Maliyet (TL)", min_value=0.0, step=0.01,
-                value=float(mevcut_pozisyon.get('maliyet', 0.0)),
-                key=f"pf_maliyet_input_{pf_ticker_db}"
-            )
-        with pf_col4:
-            st.write("")
-            st.write("")
-            if st.button("💾 Kaydet", key="pf_kaydet_btn", use_container_width=True):
-                _pf_conn2 = _watchlist_baglantisi()
-                if pf_adet <= 0:
-                    data_engine.portfoy_sil(_pf_conn2, pf_ticker_db)
+if portfoy:
+    with st.spinner("Portföy güncelleniyor..."):
+        for ticker_db, bilgi in portfoy.items():
+            df_pf = load_data(ticker_db)
+            if df_pf is None or df_pf.empty:
+                continue
+            canli_fiyat_pf, _ = get_canli_fiyat(ticker_db)
+            guncel_fiyat = canli_fiyat_pf if canli_fiyat_pf is not None else df_pf['Close'].iloc[-1]
+            ad = hisseler.get(ticker_db, ticker_db)
+            adet = bilgi['adet']
+            maliyet = bilgi['maliyet']
+            pozisyon_maliyeti = adet * maliyet
+            pozisyon_degeri = adet * guncel_fiyat
+            kar_zarar = pozisyon_degeri - pozisyon_maliyeti
+            kar_zarar_yuzde = (kar_zarar / pozisyon_maliyeti * 100) if pozisyon_maliyeti else 0
+
+            toplam_maliyet += pozisyon_maliyeti
+            toplam_deger += pozisyon_degeri
+            pf_ham_veri.append({'ad': ad, 'pozisyon_degeri': pozisyon_degeri, 'guncel_fiyat': guncel_fiyat, 'ticker_db': ticker_db})
+
+            disiplin = _pozisyon_disiplin_kontrolu(df_pf, guncel_fiyat)
+            if disiplin:
+                tur, seviye = disiplin
+                if tur == 'stop':
+                    pf_disiplin_uyarilari.append(('kirmizi', f"🔴 {ad}: fiyat stop-loss seviyesinin ({seviye:.2f} TL) altına indi."))
                 else:
-                    data_engine.portfoy_kaydet(_pf_conn2, pf_ticker_db, pf_adet, pf_maliyet)
-                _pf_conn2.close()
-                st.rerun()
+                    pf_disiplin_uyarilari.append(('yesil', f"🟢 {ad}: fiyat hedef seviyeye ({seviye:.2f} TL) ulaştı, kâr realizasyonunu değerlendir."))
 
-        if mevcut_pozisyon:
-            st.caption(f"Mevcut kayıt: {mevcut_pozisyon['adet']:.0f} adet, {mevcut_pozisyon['maliyet']:.2f} TL ortalama maliyet.")
+            pf_satirlari.append({
+                'Hisse': ad,
+                'Adet': adet,
+                'Ort. Maliyet': f"{maliyet:.2f} TL",
+                'Güncel Fiyat': f"{guncel_fiyat:.2f} TL",
+                'Toplam Değer': f"{pozisyon_degeri:,.2f} TL".replace(',', '.'),
+                'Kâr/Zarar': f"{kar_zarar:+,.2f} TL ({kar_zarar_yuzde:+.1f}%)".replace(',', '.'),
+            })
+
+yogunlasma_uyarilari = _portfoy_risk_uyarilari(pf_ham_veri, toplam_deger)
+
+# ============ GÜNLÜK ÖZET ============
+ozet_maddeleri = []
+for ad, sinyaller in bugun_sinyal_olanlar:
+    ozet_maddeleri.append(("yesil", f"🔔 {ad}: {', '.join(sinyaller)}"))
+for renk, uyari in pf_disiplin_uyarilari:
+    ozet_maddeleri.append((renk, uyari))
+for uyari in yogunlasma_uyarilari:
+    ozet_maddeleri.append(("sari", uyari))
+
+with st.container(border=True):
+    st.markdown("#### 🗞️ Günlük Özet")
+    if not ozet_maddeleri:
+        st.caption("Bugün için özel bir uyarı yok — takip listende yeni sinyal, portföyünde "
+                    "stop/hedef ihlali ya da yoğunlaşma riski görünmüyor.")
     else:
-        st.info("Önce watchlist'e hisse eklemen gerekiyor.")
+        renk_harita = {"yesil": "#22c55e", "kirmizi": "#ef4444", "sari": "#eab308"}
+        for renk, metin in ozet_maddeleri:
+            st.markdown(
+                f"<div class='risk-alarm' style='border-color:{renk_harita[renk]};'>{metin}</div>",
+                unsafe_allow_html=True
+            )
 
-if not portfoy:
-    st.info("Henüz portföyüne bir pozisyon eklemedin. Yukarıdaki 'Pozisyon Ekle / Güncelle' kısmından başlayabilirsin.")
-else:
-    pf_satirlari = []
-    pf_ham_veri = []
-    pf_disiplin_uyarilari = []
-    toplam_maliyet = 0.0
-    toplam_deger = 0.0
-    for ticker_db, bilgi in portfoy.items():
-        df_pf = load_data(ticker_db)
-        if df_pf is None or df_pf.empty:
-            continue
-        canli_fiyat_pf, _ = get_canli_fiyat(ticker_db)
-        guncel_fiyat = canli_fiyat_pf if canli_fiyat_pf is not None else df_pf['Close'].iloc[-1]
-        ad = hisseler.get(ticker_db, ticker_db)
-        adet = bilgi['adet']
-        maliyet = bilgi['maliyet']
-        pozisyon_maliyeti = adet * maliyet
-        pozisyon_degeri = adet * guncel_fiyat
-        kar_zarar = pozisyon_degeri - pozisyon_maliyeti
-        kar_zarar_yuzde = (kar_zarar / pozisyon_maliyeti * 100) if pozisyon_maliyeti else 0
+st.markdown("---")
 
-        toplam_maliyet += pozisyon_maliyeti
-        toplam_deger += pozisyon_degeri
-        pf_ham_veri.append({'ad': ad, 'pozisyon_degeri': pozisyon_degeri, 'guncel_fiyat': guncel_fiyat, 'ticker_db': ticker_db})
+# ============ SEKMELER ============
+tab1, tab2, tab3 = st.tabs(["📊 Genel Bakış", "💼 Portföy", "📈 Teknik Analiz & AI Raporları"])
 
-        disiplin = _pozisyon_disiplin_kontrolu(df_pf, guncel_fiyat)
-        if disiplin:
-            tur, seviye = disiplin
-            if tur == 'stop':
-                pf_disiplin_uyarilari.append(('kirmizi', f"🔴 {ad}: fiyat stop-loss seviyesinin ({seviye:.2f} TL) altına indi."))
-            else:
-                pf_disiplin_uyarilari.append(('yesil', f"🟢 {ad}: fiyat hedef seviyeye ({seviye:.2f} TL) ulaştı, kâr realizasyonunu değerlendir."))
+with tab1:
+    with st.spinner("Fiyatlar güncelleniyor..."):
+        cols = st.columns(len(hisseler))
+        for index, (ticker_db, name) in enumerate(hisseler.items()):
+            df = load_data(ticker_db)
+            if df is not None and not df.empty and len(df) >= 2:
+                son_satir = df.iloc[-1]
+                onceki_satir = df.iloc[-2]
+                canli_fiyat, canli_onceki_kapanis = get_canli_fiyat(ticker_db)
+                if canli_fiyat is not None:
+                    fiyat = canli_fiyat
+                    yuzde_degisim = round(((fiyat - canli_onceki_kapanis) / canli_onceki_kapanis) * 100, 2)
+                else:
+                    fiyat = round(son_satir['Close'], 2)
+                    yuzde_degisim = round(((fiyat - onceki_satir['Close']) / onceki_satir['Close']) * 100, 2)
 
-        pf_satirlari.append({
-            'Hisse': ad,
-            'Adet': adet,
-            'Ort. Maliyet': f"{maliyet:.2f} TL",
-            'Güncel Fiyat': f"{guncel_fiyat:.2f} TL",
-            'Toplam Değer': f"{pozisyon_degeri:,.2f} TL".replace(',', '.'),
-            'Kâr/Zarar': f"{kar_zarar:+,.2f} TL ({kar_zarar_yuzde:+.1f}%)".replace(',', '.'),
-        })
+                prefix = "+" if yuzde_degisim > 0 else ""
 
-    if pf_satirlari:
+                with cols[index]:
+                    st.metric(
+                        label=f"{name} ({ticker_db.replace('_IS', '')})",
+                        value=f"{fiyat} TL",
+                        delta=f"{prefix}{yuzde_degisim}%"
+                    )
+
+    st.markdown("---")
+    st.markdown("<div class='fintables-header'>🔍 Toplu Tarama</div>", unsafe_allow_html=True)
+    if tarama_satirlari:
+        st.markdown(html_tablo(tarama_satirlari), unsafe_allow_html=True)
+
+with tab2:
+    st.markdown("<div class='fintables-header'>💼 PORTFÖYÜM</div>", unsafe_allow_html=True)
+
+    with st.expander("➕ Pozisyon Ekle / Güncelle"):
+        if hisseler:
+            pf_hisse = st.selectbox("Hisse", list(hisseler.values()), key="pf_hisse_secim")
+            pf_ticker_db = [k for k, v in hisseler.items() if v == pf_hisse][0]
+            mevcut_pozisyon = portfoy.get(pf_ticker_db, {})
+
+            pf_col2, pf_col3, pf_col4 = st.columns([1, 1, 1])
+            with pf_col2:
+                pf_adet = st.number_input(
+                    "Adet", min_value=0.0, step=1.0,
+                    value=float(mevcut_pozisyon.get('adet', 0.0)),
+                    key=f"pf_adet_input_{pf_ticker_db}"
+                )
+            with pf_col3:
+                pf_maliyet = st.number_input(
+                    "Ort. Maliyet (TL)", min_value=0.0, step=0.01,
+                    value=float(mevcut_pozisyon.get('maliyet', 0.0)),
+                    key=f"pf_maliyet_input_{pf_ticker_db}"
+                )
+            with pf_col4:
+                st.write("")
+                st.write("")
+                if st.button("💾 Kaydet", key="pf_kaydet_btn", use_container_width=True):
+                    _pf_conn2 = _watchlist_baglantisi()
+                    if pf_adet <= 0:
+                        data_engine.portfoy_sil(_pf_conn2, pf_ticker_db)
+                    else:
+                        data_engine.portfoy_kaydet(_pf_conn2, pf_ticker_db, pf_adet, pf_maliyet)
+                    _pf_conn2.close()
+                    st.rerun()
+
+            if mevcut_pozisyon:
+                st.caption(f"Mevcut kayıt: {mevcut_pozisyon['adet']:.0f} adet, {mevcut_pozisyon['maliyet']:.2f} TL ortalama maliyet.")
+        else:
+            st.info("Önce watchlist'e hisse eklemen gerekiyor.")
+
+    if not portfoy:
+        st.info("Henüz portföyüne bir pozisyon eklemedin. Yukarıdaki 'Pozisyon Ekle / Güncelle' kısmından başlayabilirsin.")
+    elif pf_satirlari:
         st.markdown(html_tablo(pf_satirlari), unsafe_allow_html=True)
 
         toplam_kz = toplam_deger - toplam_maliyet
@@ -1080,7 +1118,6 @@ else:
         with ozet_cols[2]:
             st.metric("Toplam Kâr/Zarar", f"{toplam_kz:,.2f} TL".replace(',', '.'), delta=f"{toplam_kz_yuzde:+.1f}%")
 
-        yogunlasma_uyarilari = _portfoy_risk_uyarilari(pf_ham_veri, toplam_deger)
         for uyari in yogunlasma_uyarilari:
             st.markdown(f"<div class='risk-alarm'>{uyari}</div>", unsafe_allow_html=True)
         for renk, uyari in pf_disiplin_uyarilari:
@@ -1090,510 +1127,514 @@ else:
                 st.markdown(f"<div class='risk-alarm' style='border-color:#22c55e; background: rgba(34,197,94,0.12);'>{uyari}</div>", unsafe_allow_html=True)
         st.caption(f"ℹ️ Disiplin kuralı: tek pozisyon portföyün %35'ini (≈ {toplam_deger * 0.35:,.2f} TL) geçmemesi önerilir.".replace(',', '.'))
 
-st.markdown("---")
+with tab3:
+    col_left, col_right = st.columns([2.2, 1])
 
-col_left, col_right = st.columns([2.2, 1])
+    with col_left:
+        secilen_hisse_adi = st.selectbox("📊 Detaylı Analiz İçin Hisse Seç:", list(hisseler.values()))
+        secilen_ticker = [k for k, v in hisseler.items() if v == secilen_hisse_adi][0]
+        yf_ticker = secilen_ticker.replace('_', '.')
 
-with col_left:
-    secilen_hisse_adi = st.selectbox("📊 Detaylı Analiz İçin Hisse Seç:", list(hisseler.values()))
-    secilen_ticker = [k for k, v in hisseler.items() if v == secilen_hisse_adi][0]
-    yf_ticker = secilen_ticker.replace('_', '.')
-
-    df_secilen = load_data(secilen_ticker)
-    karsilastirma_satirlari = []
-
-    if df_secilen is not None and not df_secilen.empty:
-        son_hacim = df_secilen['Volume'].iloc[-1]
-        st.markdown(f"**İşlem Hacmi:** {son_hacim:,.0f} LOT".replace(",", "."))
-
-        gun_haritasi = {"1 Ay": 30, "3 Ay": 90, "6 Ay": 180, "1 Yıl": 366}
-        zaman_araligi = st.radio(
-            "Zaman Aralığı", list(gun_haritasi.keys()), index=3, horizontal=True,
-            key=f"zaman_araligi_{secilen_ticker}", label_visibility="collapsed"
-        )
-        son_tarih = df_secilen['Date'].max()
-        baslangic_tarih = son_tarih - pd.Timedelta(days=gun_haritasi[zaman_araligi])
-        df_gorunum = df_secilen[df_secilen['Date'] >= baslangic_tarih].reset_index(drop=True)
-        if df_gorunum.empty:
-            df_gorunum = df_secilen
-
-        bbu_col = next((c for c in df_gorunum.columns if c.startswith('BBU_20')), None)
-        bbl_col = next((c for c in df_gorunum.columns if c.startswith('BBL_20')), None)
-        bbb_col = next((c for c in df_gorunum.columns if c.startswith('BBB_20')), None)
-
-        fig = make_subplots(
-            rows=4, cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.025,
-            row_heights=[0.40, 0.20, 0.20, 0.20],
-            specs=[[{"secondary_y": True}], [{}], [{}], [{}]]
-        )
-
-        y1_top = fig.layout.yaxis.domain[1]
-        y2_top = fig.layout.yaxis3.domain[1]
-        y3_top = fig.layout.yaxis4.domain[1]
-        y4_top = fig.layout.yaxis5.domain[1]
-
-        # 0. Hacim (Volume) - fiyat panelinin arkasında yarı saydam
-        hacim_renkleri = [
-            'rgba(34,197,94,0.35)' if df_gorunum['Close'].iloc[i] >= df_gorunum['Open'].iloc[i] else 'rgba(239,68,68,0.35)'
-            for i in range(len(df_gorunum))
-        ]
-        fig.add_trace(go.Bar(
-            x=df_gorunum['Date'], y=df_gorunum['Volume'], name='Hacim',
-            marker_color=hacim_renkleri, showlegend=False
-        ), row=1, col=1, secondary_y=True)
-        max_hacim = df_gorunum['Volume'].max()
-        fig.update_yaxes(range=[0, max_hacim * 4], showticklabels=False, showgrid=False, secondary_y=True, row=1, col=1)
-
-        # 1. Candlestick (Mum) Grafik
-        fig.add_trace(go.Candlestick(
-            x=df_gorunum['Date'],
-            open=df_gorunum['Open'],
-            high=df_gorunum['High'],
-            low=df_gorunum['Low'],
-            close=df_gorunum['Close'],
-            name='OHLC',
-            showlegend=False
-        ), row=1, col=1)
-
-        if 'EMA_50' in df_gorunum.columns:
-            fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum['EMA_50'], name='EMA 50', legend='legend', line=dict(color='#f0a500', width=1.3)), row=1, col=1)
-        if 'EMA_200' in df_gorunum.columns:
-            fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum['EMA_200'], name='EMA 200', legend='legend', line=dict(color='#0891b2', width=1.3)), row=1, col=1)
-
-        if bbu_col and bbl_col:
-            fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum[bbu_col], name='Bollinger', legendgroup='bb', legend='legend', line=dict(color='#5b6b8c', width=1)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum[bbl_col], name='Bollinger', legendgroup='bb', legend='legend', showlegend=False, line=dict(color='#5b6b8c', width=1), fill='tonexty', fillcolor='rgba(91,107,140,0.08)'), row=1, col=1)
-
-        # SuperTrend (muhafazakar) yön kırılımlarında AL / SAT okları
-        if 'Sinyal_Degisim' in df_gorunum.columns:
-            al_df = df_gorunum[df_gorunum['Sinyal_Degisim'] == 2]
-            sat_df = df_gorunum[df_gorunum['Sinyal_Degisim'] == -2]
-
-            if not al_df.empty:
-                fig.add_trace(go.Scatter(
-                    x=al_df['Date'], y=al_df['Low'] * 0.98, mode='markers',
-                    marker=dict(symbol='triangle-up', size=11, color='#22c55e'),
-                    name='SuperTrend AL', legend='legend'
-                ), row=1, col=1)
-            if not sat_df.empty:
-                fig.add_trace(go.Scatter(
-                    x=sat_df['Date'], y=sat_df['High'] * 1.02, mode='markers',
-                    marker=dict(symbol='triangle-down', size=11, color='#ef4444'),
-                    name='SuperTrend SAT', legend='legend'
-                ), row=1, col=1)
-
-        # Optimize Sinyal: MACD kesişimi + SuperTrend trend onaylı, daha sık ama filtreli
-        if 'Optimize_AL' in df_gorunum.columns:
-            opt_al_df = df_gorunum[df_gorunum['Optimize_AL'].astype(bool)]
-            opt_sat_df = df_gorunum[df_gorunum['Optimize_SAT'].astype(bool)]
-
-            if not opt_al_df.empty:
-                fig.add_trace(go.Scatter(
-                    x=opt_al_df['Date'], y=opt_al_df['Low'] * 0.995, mode='markers',
-                    marker=dict(symbol='diamond', size=8, color='#4ade80', line=dict(width=1, color='#131722')),
-                    name='Optimize AL', legend='legend'
-                ), row=1, col=1)
-            if not opt_sat_df.empty:
-                fig.add_trace(go.Scatter(
-                    x=opt_sat_df['Date'], y=opt_sat_df['High'] * 1.005, mode='markers',
-                    marker=dict(symbol='diamond', size=8, color='#f87171', line=dict(width=1, color='#131722')),
-                    name='Optimize SAT', legend='legend'
-                ), row=1, col=1)
-
-        # Squeeze Breakout: Bollinger sıkışması sonrası kırılım
-        if 'Squeeze_AL' in df_gorunum.columns:
-            sq_al_df = df_gorunum[df_gorunum['Squeeze_AL'].astype(bool)]
-            sq_sat_df = df_gorunum[df_gorunum['Squeeze_SAT'].astype(bool)]
-
-            if not sq_al_df.empty:
-                fig.add_trace(go.Scatter(
-                    x=sq_al_df['Date'], y=sq_al_df['Low'] * 0.97, mode='markers',
-                    marker=dict(symbol='star', size=12, color='#22d3ee', line=dict(width=1, color='#131722')),
-                    name='Squeeze AL', legend='legend'
-                ), row=1, col=1)
-            if not sq_sat_df.empty:
-                fig.add_trace(go.Scatter(
-                    x=sq_sat_df['Date'], y=sq_sat_df['High'] * 1.03, mode='markers',
-                    marker=dict(symbol='star', size=12, color='#fb923c', line=dict(width=1, color='#131722')),
-                    name='Squeeze SAT', legend='legend'
-                ), row=1, col=1)
-
-        # 2. MACD Paneli
-        if 'MACD_12_26_9' in df_gorunum.columns:
-            hist_renkleri = ['#22c55e' if v >= 0 else '#ef4444' for v in df_gorunum['MACDh_12_26_9'].fillna(0)]
-            fig.add_trace(go.Bar(x=df_gorunum['Date'], y=df_gorunum['MACDh_12_26_9'], name='Histogram', marker_color=hist_renkleri, showlegend=False), row=2, col=1)
-            fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum['MACD_12_26_9'], name='MACD', legend='legend2', line=dict(color='#2962ff', width=1.3)), row=2, col=1)
-            fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum['MACDs_12_26_9'], name='Sinyal', legend='legend2', line=dict(color='#ff9800', width=1.3)), row=2, col=1)
-
-        # 3. RSI ve Stokastik RSI Paneli
-        if 'RSI_14' in df_gorunum.columns:
-            fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum['RSI_14'], name='RSI 14', legend='legend3', line=dict(color='#a855f7', width=1.3)), row=3, col=1)
-            fig.add_shape(type="line", x0=df_gorunum['Date'].min(), y0=70, x1=df_gorunum['Date'].max(), y1=70, line=dict(color="#ef4444", dash="dash", width=1), row=3, col=1)
-            fig.add_shape(type="line", x0=df_gorunum['Date'].min(), y0=30, x1=df_gorunum['Date'].max(), y1=30, line=dict(color="#22c55e", dash="dash", width=1), row=3, col=1)
-
-        stochrsi_k_col = next((c for c in df_gorunum.columns if c.startswith('STOCHRSIk')), None)
-        stochrsi_d_col = next((c for c in df_gorunum.columns if c.startswith('STOCHRSId')), None)
-        if stochrsi_k_col:
-            fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum[stochrsi_k_col], name='StochRSI %K', legend='legend3', line=dict(color='#0284c7', width=1, dash='dot')), row=3, col=1)
-        if stochrsi_d_col:
-            fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum[stochrsi_d_col], name='StochRSI %D', legend='legend3', line=dict(color='#f59e0b', width=1, dash='dot')), row=3, col=1)
-
-        # 4. Bollinger Bandwidth Paneli
-        if bbb_col:
-            fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum[bbb_col], name='BB Bandwidth', legend='legend4', line=dict(color='#eab308', width=1.3), fill='tozeroy', fillcolor='rgba(234,179,8,0.08)'), row=4, col=1)
-
-        legend_style = dict(orientation='h', bgcolor='rgba(0,0,0,0)', bordercolor='rgba(0,0,0,0)', font=dict(size=9, color=TEXT_COLOR), tracegroupgap=6)
-
-        fig.update_layout(
-            template="plotly_dark",
-            paper_bgcolor=CHART_BG,
-            plot_bgcolor=CHART_BG,
-            font=dict(color=TEXT_COLOR),
-            xaxis_rangeslider_visible=False,
-            height=880,
-            margin=dict(l=10, r=10, t=15, b=10),
-            showlegend=True,
-            legend=dict(x=0.005, y=y1_top - 0.015, xanchor='left', yanchor='top', **legend_style),
-            legend2=dict(x=0.005, y=y2_top - 0.02, xanchor='left', yanchor='top', **legend_style),
-            legend3=dict(x=0.005, y=y3_top - 0.02, xanchor='left', yanchor='top', **legend_style),
-            legend4=dict(x=0.005, y=y4_top - 0.02, xanchor='left', yanchor='top', **legend_style),
-        )
-        fig.update_xaxes(gridcolor=GRID_COLOR, showticklabels=False, row=1, col=1)
-        fig.update_xaxes(gridcolor=GRID_COLOR, showticklabels=False, row=2, col=1)
-        fig.update_xaxes(gridcolor=GRID_COLOR, showticklabels=False, row=3, col=1)
-        fig.update_xaxes(gridcolor=GRID_COLOR, showticklabels=True, row=4, col=1)
-        fig.update_yaxes(gridcolor=GRID_COLOR)
-        st.plotly_chart(fig, use_container_width=True)
-
-        sinyal_sistemleri = [
-            ('SuperTrend', df_secilen.get('Sinyal_Degisim') == 2, df_secilen.get('Sinyal_Degisim') == -2),
-            ('Optimize', df_secilen.get('Optimize_AL', pd.Series(False, index=df_secilen.index)).astype(bool),
-             df_secilen.get('Optimize_SAT', pd.Series(False, index=df_secilen.index)).astype(bool)),
-            ('Squeeze Breakout', df_secilen.get('Squeeze_AL', pd.Series(False, index=df_secilen.index)).astype(bool),
-             df_secilen.get('Squeeze_SAT', pd.Series(False, index=df_secilen.index)).astype(bool)),
-        ]
-
+        df_secilen = load_data(secilen_ticker)
         karsilastirma_satirlari = []
-        for sistem_adi, al_kosulu, sat_kosulu in sinyal_sistemleri:
-            perf = sinyal_performansi(df_secilen, al_kosulu, sat_kosulu)
-            if perf:
-                karsilastirma_satirlari.append({
-                    'Sistem': sistem_adi,
-                    'Son Sinyal Sayısı': perf['toplam_sinyal'],
-                    'Kazanma Oranı': f"%{perf['kazanma_orani']:.0f}",
-                    'Ortalama Getiri': f"%{perf['ortalama_getiri']:+.2f}",
-                    'Açık Pozisyon': "Evet" if perf['acik_pozisyon_var'] else "Hayır",
-                })
 
-        if karsilastirma_satirlari:
-            st.markdown("<div class='fintables-header'>📈 Sinyal Performans Karşılaştırması (Geçmiş)</div>", unsafe_allow_html=True)
-            st.markdown(html_tablo(karsilastirma_satirlari), unsafe_allow_html=True)
-            st.caption("⚠️ Geçmiş sinyal performansı gelecekteki sonuçların garantisi değildir.")
+        if df_secilen is not None and not df_secilen.empty:
+            son_hacim = df_secilen['Volume'].iloc[-1]
+            st.markdown(f"**İşlem Hacmi:** {son_hacim:,.0f} LOT".replace(",", "."))
 
-with col_right:
-    fundamentals = fetch_fundamentals(yf_ticker)
-    fk = fundamentals.get('fk')
-    pddd = fundamentals.get('pddd')
-    cari_oran = fundamentals.get('cari_oran')
-    net_borc_favok = fundamentals.get('net_borc_favok')
-    roe = fundamentals.get('roe')
-    is_banka = cari_oran is None or net_borc_favok is None
+            gun_haritasi = {"1 Ay": 30, "3 Ay": 90, "6 Ay": 180, "1 Yıl": 366}
+            zaman_araligi = st.radio(
+                "Zaman Aralığı", list(gun_haritasi.keys()), index=3, horizontal=True,
+                key=f"zaman_araligi_{secilen_ticker}", label_visibility="collapsed"
+            )
+            son_tarih = df_secilen['Date'].max()
+            baslangic_tarih = son_tarih - pd.Timedelta(days=gun_haritasi[zaman_araligi])
+            df_gorunum = df_secilen[df_secilen['Date'] >= baslangic_tarih].reset_index(drop=True)
+            if df_gorunum.empty:
+                df_gorunum = df_secilen
 
-    finansal_risk = (cari_oran is not None and cari_oran < 1) or (net_borc_favok is not None and net_borc_favok > 4)
+            bbu_col = next((c for c in df_gorunum.columns if c.startswith('BBU_20')), None)
+            bbl_col = next((c for c in df_gorunum.columns if c.startswith('BBL_20')), None)
+            bbb_col = next((c for c in df_gorunum.columns if c.startswith('BBB_20')), None)
 
-    gemini_client = get_gemini_client()
-    veri_baglami = None
-    veri_baglami_claude = None
-    karar = skor = ema_durum = rsi_durum = st_durum = finansal_durum = None
-    rsi_deger = None
-
-    st.markdown("<div class='fintables-header'>🧠 GEMİNİ DERİN ANALİZ RAPORU</div>", unsafe_allow_html=True)
-
-    if df_secilen is not None and not df_secilen.empty:
-        son_s = df_secilen.iloc[-1].copy()
-        canli_fiyat_secilen, _ = get_canli_fiyat(secilen_ticker)
-        if canli_fiyat_secilen is not None:
-            son_s['Close'] = canli_fiyat_secilen
-
-        bogalar = 0
-        toplam_kriter = 5
-
-        ema_durum = "Trend Üstü (Boğa) 🟢" if son_s['Close'] > son_s['EMA_200'] else "Trend Altı (Ayı) 🔴"
-        if son_s['Close'] > son_s['EMA_200']:
-            bogalar += 1
-
-        rsi_deger = son_s['RSI_14']
-        rsi_durum = "Nötr Seviye ⚪"
-        if rsi_deger < 35:
-            rsi_durum = "Aşırı Ucuz (Destek Bölgesi) 🟢"
-            bogalar += 1
-        elif rsi_deger > 70:
-            rsi_durum = "Aşırı Şişkin (Direnç Bölgesi) 🔴"
-        else:
-            bogalar += 0.5
-
-        st_col = next((c for c in df_secilen.columns if c.startswith('SUPERTd')), None)
-        is_st_buy = (son_s[st_col] == 1) if st_col else True
-        st_durum = "AL Sinyali Aktif 🟢" if is_st_buy else "SAT Sinyali Aktif 🔴"
-        if is_st_buy:
-            bogalar += 1
-
-        finansal_durum = "Riskli 🔴" if finansal_risk else "Sağlıklı 🟢"
-        if not finansal_risk:
-            bogalar += 1
-
-        skor = (bogalar / toplam_kriter) * 100
-        if skor >= 75:
-            karar = "GÜÇLÜ AL (Kademeli Alım)"
-        elif skor >= 50:
-            karar = "TUT / İZLE (Nötr Pozisyon)"
-        else:
-            karar = "ZAYIF / KÂR REALİZASYONU"
-
-        momentum_10g = None
-        if len(df_secilen) > 10:
-            momentum_10g = ((son_s['Close'] / df_secilen['Close'].iloc[-11]) - 1) * 100
-
-        index_df = load_index_data()
-        fark = None
-        if index_df is not None and len(index_df) > 10 and momentum_10g is not None:
-            index_momentum = ((index_df['Close'].iloc[-1] / index_df['Close'].iloc[-11]) - 1) * 100
-            fark = momentum_10g - index_momentum
-
-        divergence = detect_rsi_divergence(df_secilen)
-
-        hedef_fiyat, stop_loss = _hedef_ve_stop_hesapla(df_secilen, son_s)
-
-        _, direnc_seviyeleri, destek_seviyeleri, _ = _destek_direnc_seviyeleri(
-            df_secilen, gun_sayisi=120, guncel_fiyat_override=son_s['Close']
-        )
-
-        adx_deger = son_s.get('ADX_14')
-        di_plus = son_s.get('DMP_14')
-        di_minus = son_s.get('DMN_14')
-        hacim_teyidi_oran = _hacim_teyidi(df_secilen)
-        fibonacci = _fibonacci_seviyeleri(df_secilen)
-        konsensus = _sinyal_konsensusu(ema_durum, rsi_deger, st_durum, di_plus, di_minus)
-
-        veri_baglami = build_veri_baglami(
-            secilen_hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_durum, finansal_durum,
-            momentum_10g, fark, divergence, hedef_fiyat, stop_loss,
-            fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka,
-            karsilastirma_satirlari, direnc_seviyeleri, destek_seviyeleri,
-            adx_deger, di_plus, di_minus, hacim_teyidi_oran, fibonacci, konsensus
-        )
-        veri_baglami_claude = build_veri_baglami(
-            secilen_hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_durum, finansal_durum,
-            momentum_10g, fark, divergence, hedef_fiyat, stop_loss,
-            fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka,
-            karsilastirma_satirlari, direnc_seviyeleri, destek_seviyeleri,
-            konsensus=konsensus, claude_icin_kisitli=True
-        )
-
-        if konsensus:
-            renk = "#22c55e" if konsensus['yon'] == "Yükseliş" else ("#ef4444" if konsensus['yon'] == "Düşüş" else "#eab308")
-            st.markdown(
-                f"<div class='risk-alarm' style='border-color:{renk}; background: rgba(0,0,0,0.15);'>"
-                f"📊 Sinyal Konsensüsü: {konsensus['al_sayisi']}/{konsensus['toplam']} gösterge "
-                f"<b>{konsensus['yon']}</b> yönlü</div>",
-                unsafe_allow_html=True
+            fig = make_subplots(
+                rows=4, cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.025,
+                row_heights=[0.40, 0.20, 0.20, 0.20],
+                specs=[[{"secondary_y": True}], [{}], [{}], [{}]]
             )
 
-    with st.expander("🏛️ Bağımsız Araştırma Raporu (Claude)", expanded=False):
-        claude_client = get_anthropic_client()
-        ust_akil_key = f"claude_rapor_{secilen_ticker}"
-        if claude_client is None:
-            st.info("Bu özellik için proje kök dizinindeki .env dosyasına ANTHROPIC_API_KEY eklemen gerekiyor.")
-        elif veri_baglami_claude is not None:
-            if st.button("🔍 Claude ile Bağımsız Araştırma Yap", key=f"claude_btn_{secilen_ticker}"):
-                with st.spinner("Claude web'de araştırma yapıyor ve rapor hazırlıyor... (bir dakika kadar sürebilir)"):
-                    claude_rapor, claude_hata = claude_ust_akil_raporu(veri_baglami_claude, secilen_hisse_adi)
-                    if claude_hata:
-                        st.error(claude_hata)
-                    else:
-                        st.session_state[ust_akil_key] = claude_rapor
-            if st.session_state.get(ust_akil_key):
+            y1_top = fig.layout.yaxis.domain[1]
+            y2_top = fig.layout.yaxis3.domain[1]
+            y3_top = fig.layout.yaxis4.domain[1]
+            y4_top = fig.layout.yaxis5.domain[1]
+
+            # 0. Hacim (Volume) - fiyat panelinin arkasında yarı saydam
+            hacim_renkleri = [
+                'rgba(34,197,94,0.35)' if df_gorunum['Close'].iloc[i] >= df_gorunum['Open'].iloc[i] else 'rgba(239,68,68,0.35)'
+                for i in range(len(df_gorunum))
+            ]
+            fig.add_trace(go.Bar(
+                x=df_gorunum['Date'], y=df_gorunum['Volume'], name='Hacim',
+                marker_color=hacim_renkleri, showlegend=False
+            ), row=1, col=1, secondary_y=True)
+            max_hacim = df_gorunum['Volume'].max()
+            fig.update_yaxes(range=[0, max_hacim * 4], showticklabels=False, showgrid=False, secondary_y=True, row=1, col=1)
+
+            # 1. Candlestick (Mum) Grafik
+            fig.add_trace(go.Candlestick(
+                x=df_gorunum['Date'],
+                open=df_gorunum['Open'],
+                high=df_gorunum['High'],
+                low=df_gorunum['Low'],
+                close=df_gorunum['Close'],
+                name='OHLC',
+                showlegend=False
+            ), row=1, col=1)
+
+            if 'EMA_50' in df_gorunum.columns:
+                fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum['EMA_50'], name='EMA 50', legend='legend', line=dict(color='#f0a500', width=1.3)), row=1, col=1)
+            if 'EMA_200' in df_gorunum.columns:
+                fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum['EMA_200'], name='EMA 200', legend='legend', line=dict(color='#0891b2', width=1.3)), row=1, col=1)
+
+            if bbu_col and bbl_col:
+                fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum[bbu_col], name='Bollinger', legendgroup='bb', legend='legend', line=dict(color='#5b6b8c', width=1)), row=1, col=1)
+                fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum[bbl_col], name='Bollinger', legendgroup='bb', legend='legend', showlegend=False, line=dict(color='#5b6b8c', width=1), fill='tonexty', fillcolor='rgba(91,107,140,0.08)'), row=1, col=1)
+
+            # SuperTrend (muhafazakar) yön kırılımlarında AL / SAT okları
+            if 'Sinyal_Degisim' in df_gorunum.columns:
+                al_df = df_gorunum[df_gorunum['Sinyal_Degisim'] == 2]
+                sat_df = df_gorunum[df_gorunum['Sinyal_Degisim'] == -2]
+
+                if not al_df.empty:
+                    fig.add_trace(go.Scatter(
+                        x=al_df['Date'], y=al_df['Low'] * 0.98, mode='markers',
+                        marker=dict(symbol='triangle-up', size=11, color='#22c55e'),
+                        name='SuperTrend AL', legend='legend'
+                    ), row=1, col=1)
+                if not sat_df.empty:
+                    fig.add_trace(go.Scatter(
+                        x=sat_df['Date'], y=sat_df['High'] * 1.02, mode='markers',
+                        marker=dict(symbol='triangle-down', size=11, color='#ef4444'),
+                        name='SuperTrend SAT', legend='legend'
+                    ), row=1, col=1)
+
+            # Optimize Sinyal: MACD kesişimi + SuperTrend trend onaylı, daha sık ama filtreli
+            if 'Optimize_AL' in df_gorunum.columns:
+                opt_al_df = df_gorunum[df_gorunum['Optimize_AL'].astype(bool)]
+                opt_sat_df = df_gorunum[df_gorunum['Optimize_SAT'].astype(bool)]
+
+                if not opt_al_df.empty:
+                    fig.add_trace(go.Scatter(
+                        x=opt_al_df['Date'], y=opt_al_df['Low'] * 0.995, mode='markers',
+                        marker=dict(symbol='diamond', size=8, color='#4ade80', line=dict(width=1, color='#131722')),
+                        name='Optimize AL', legend='legend'
+                    ), row=1, col=1)
+                if not opt_sat_df.empty:
+                    fig.add_trace(go.Scatter(
+                        x=opt_sat_df['Date'], y=opt_sat_df['High'] * 1.005, mode='markers',
+                        marker=dict(symbol='diamond', size=8, color='#f87171', line=dict(width=1, color='#131722')),
+                        name='Optimize SAT', legend='legend'
+                    ), row=1, col=1)
+
+            # Squeeze Breakout: Bollinger sıkışması sonrası kırılım
+            if 'Squeeze_AL' in df_gorunum.columns:
+                sq_al_df = df_gorunum[df_gorunum['Squeeze_AL'].astype(bool)]
+                sq_sat_df = df_gorunum[df_gorunum['Squeeze_SAT'].astype(bool)]
+
+                if not sq_al_df.empty:
+                    fig.add_trace(go.Scatter(
+                        x=sq_al_df['Date'], y=sq_al_df['Low'] * 0.97, mode='markers',
+                        marker=dict(symbol='star', size=12, color='#22d3ee', line=dict(width=1, color='#131722')),
+                        name='Squeeze AL', legend='legend'
+                    ), row=1, col=1)
+                if not sq_sat_df.empty:
+                    fig.add_trace(go.Scatter(
+                        x=sq_sat_df['Date'], y=sq_sat_df['High'] * 1.03, mode='markers',
+                        marker=dict(symbol='star', size=12, color='#fb923c', line=dict(width=1, color='#131722')),
+                        name='Squeeze SAT', legend='legend'
+                    ), row=1, col=1)
+
+            # 2. MACD Paneli
+            if 'MACD_12_26_9' in df_gorunum.columns:
+                hist_renkleri = ['#22c55e' if v >= 0 else '#ef4444' for v in df_gorunum['MACDh_12_26_9'].fillna(0)]
+                fig.add_trace(go.Bar(x=df_gorunum['Date'], y=df_gorunum['MACDh_12_26_9'], name='Histogram', marker_color=hist_renkleri, showlegend=False), row=2, col=1)
+                fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum['MACD_12_26_9'], name='MACD', legend='legend2', line=dict(color='#2962ff', width=1.3)), row=2, col=1)
+                fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum['MACDs_12_26_9'], name='Sinyal', legend='legend2', line=dict(color='#ff9800', width=1.3)), row=2, col=1)
+
+            # 3. RSI ve Stokastik RSI Paneli
+            if 'RSI_14' in df_gorunum.columns:
+                fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum['RSI_14'], name='RSI 14', legend='legend3', line=dict(color='#a855f7', width=1.3)), row=3, col=1)
+                fig.add_shape(type="line", x0=df_gorunum['Date'].min(), y0=70, x1=df_gorunum['Date'].max(), y1=70, line=dict(color="#ef4444", dash="dash", width=1), row=3, col=1)
+                fig.add_shape(type="line", x0=df_gorunum['Date'].min(), y0=30, x1=df_gorunum['Date'].max(), y1=30, line=dict(color="#22c55e", dash="dash", width=1), row=3, col=1)
+
+            stochrsi_k_col = next((c for c in df_gorunum.columns if c.startswith('STOCHRSIk')), None)
+            stochrsi_d_col = next((c for c in df_gorunum.columns if c.startswith('STOCHRSId')), None)
+            if stochrsi_k_col:
+                fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum[stochrsi_k_col], name='StochRSI %K', legend='legend3', line=dict(color='#0284c7', width=1, dash='dot')), row=3, col=1)
+            if stochrsi_d_col:
+                fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum[stochrsi_d_col], name='StochRSI %D', legend='legend3', line=dict(color='#f59e0b', width=1, dash='dot')), row=3, col=1)
+
+            # 4. Bollinger Bandwidth Paneli
+            if bbb_col:
+                fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum[bbb_col], name='BB Bandwidth', legend='legend4', line=dict(color='#eab308', width=1.3), fill='tozeroy', fillcolor='rgba(234,179,8,0.08)'), row=4, col=1)
+
+            legend_style = dict(orientation='h', bgcolor='rgba(0,0,0,0)', bordercolor='rgba(0,0,0,0)', font=dict(size=9, color=TEXT_COLOR), tracegroupgap=6)
+
+            fig.update_layout(
+                template="plotly_dark",
+                paper_bgcolor=CHART_BG,
+                plot_bgcolor=CHART_BG,
+                font=dict(color=TEXT_COLOR),
+                xaxis_rangeslider_visible=False,
+                height=880,
+                margin=dict(l=10, r=10, t=15, b=10),
+                showlegend=True,
+                legend=dict(x=0.005, y=y1_top - 0.015, xanchor='left', yanchor='top', **legend_style),
+                legend2=dict(x=0.005, y=y2_top - 0.02, xanchor='left', yanchor='top', **legend_style),
+                legend3=dict(x=0.005, y=y3_top - 0.02, xanchor='left', yanchor='top', **legend_style),
+                legend4=dict(x=0.005, y=y4_top - 0.02, xanchor='left', yanchor='top', **legend_style),
+            )
+            fig.update_xaxes(gridcolor=GRID_COLOR, showticklabels=False, row=1, col=1)
+            fig.update_xaxes(gridcolor=GRID_COLOR, showticklabels=False, row=2, col=1)
+            fig.update_xaxes(gridcolor=GRID_COLOR, showticklabels=False, row=3, col=1)
+            fig.update_xaxes(gridcolor=GRID_COLOR, showticklabels=True, row=4, col=1)
+            fig.update_yaxes(gridcolor=GRID_COLOR)
+            st.plotly_chart(fig, use_container_width=True)
+
+            sinyal_sistemleri = [
+                ('SuperTrend', df_secilen.get('Sinyal_Degisim') == 2, df_secilen.get('Sinyal_Degisim') == -2),
+                ('Optimize', df_secilen.get('Optimize_AL', pd.Series(False, index=df_secilen.index)).astype(bool),
+                 df_secilen.get('Optimize_SAT', pd.Series(False, index=df_secilen.index)).astype(bool)),
+                ('Squeeze Breakout', df_secilen.get('Squeeze_AL', pd.Series(False, index=df_secilen.index)).astype(bool),
+                 df_secilen.get('Squeeze_SAT', pd.Series(False, index=df_secilen.index)).astype(bool)),
+            ]
+
+            karsilastirma_satirlari = []
+            for sistem_adi, al_kosulu, sat_kosulu in sinyal_sistemleri:
+                perf = sinyal_performansi(df_secilen, al_kosulu, sat_kosulu)
+                if perf:
+                    karsilastirma_satirlari.append({
+                        'Sistem': sistem_adi,
+                        'Son Sinyal Sayısı': perf['toplam_sinyal'],
+                        'Kazanma Oranı': f"%{perf['kazanma_orani']:.0f}",
+                        'Ortalama Getiri': f"%{perf['ortalama_getiri']:+.2f}",
+                        'Açık Pozisyon': "Evet" if perf['acik_pozisyon_var'] else "Hayır",
+                    })
+
+            if karsilastirma_satirlari:
+                st.markdown("<div class='fintables-header'>📈 Sinyal Performans Karşılaştırması (Geçmiş)</div>", unsafe_allow_html=True)
+                st.markdown(html_tablo(karsilastirma_satirlari), unsafe_allow_html=True)
+                st.caption("⚠️ Geçmiş sinyal performansı gelecekteki sonuçların garantisi değildir.")
+
+    with col_right:
+        fundamentals = fetch_fundamentals(yf_ticker)
+        fk = fundamentals.get('fk')
+        pddd = fundamentals.get('pddd')
+        cari_oran = fundamentals.get('cari_oran')
+        net_borc_favok = fundamentals.get('net_borc_favok')
+        roe = fundamentals.get('roe')
+        is_banka = cari_oran is None or net_borc_favok is None
+
+        finansal_risk = (cari_oran is not None and cari_oran < 1) or (net_borc_favok is not None and net_borc_favok > 4)
+
+        gemini_client = get_gemini_client()
+        veri_baglami = None
+        veri_baglami_claude = None
+        karar = skor = ema_durum = rsi_durum = st_durum = finansal_durum = None
+        rsi_deger = None
+
+        st.markdown("<div class='fintables-header'>🧠 GEMİNİ DERİN ANALİZ RAPORU</div>", unsafe_allow_html=True)
+
+        if df_secilen is not None and not df_secilen.empty:
+            son_s = df_secilen.iloc[-1].copy()
+            canli_fiyat_secilen, _ = get_canli_fiyat(secilen_ticker)
+            if canli_fiyat_secilen is not None:
+                son_s['Close'] = canli_fiyat_secilen
+
+            bogalar = 0
+            toplam_kriter = 5
+
+            ema_durum = "Trend Üstü (Boğa) 🟢" if son_s['Close'] > son_s['EMA_200'] else "Trend Altı (Ayı) 🔴"
+            if son_s['Close'] > son_s['EMA_200']:
+                bogalar += 1
+
+            rsi_deger = son_s['RSI_14']
+            rsi_durum = "Nötr Seviye ⚪"
+            if rsi_deger < 30:
+                rsi_durum = "Aşırı Ucuz (Destek Bölgesi) 🟢"
+                bogalar += 1
+            elif rsi_deger > 70:
+                rsi_durum = "Aşırı Şişkin (Direnç Bölgesi) 🔴"
+            else:
+                bogalar += 0.5
+
+            st_col = next((c for c in df_secilen.columns if c.startswith('SUPERTd')), None)
+            is_st_buy = (son_s[st_col] == 1) if st_col else True
+            st_durum = "AL Sinyali Aktif 🟢" if is_st_buy else "SAT Sinyali Aktif 🔴"
+            if is_st_buy:
+                bogalar += 1
+
+            finansal_durum = "Riskli 🔴" if finansal_risk else "Sağlıklı 🟢"
+            if not finansal_risk:
+                bogalar += 1
+
+            skor = (bogalar / toplam_kriter) * 100
+            if skor >= 75:
+                karar = "GÜÇLÜ AL (Kademeli Alım)"
+            elif skor >= 50:
+                karar = "TUT / İZLE (Nötr Pozisyon)"
+            else:
+                karar = "ZAYIF / KÂR REALİZASYONU"
+
+            momentum_10g = None
+            if len(df_secilen) > 10:
+                momentum_10g = ((son_s['Close'] / df_secilen['Close'].iloc[-11]) - 1) * 100
+
+            index_df = load_index_data()
+            fark = None
+            if index_df is not None and len(index_df) > 10 and momentum_10g is not None:
+                index_momentum = ((index_df['Close'].iloc[-1] / index_df['Close'].iloc[-11]) - 1) * 100
+                fark = momentum_10g - index_momentum
+
+            divergence = detect_rsi_divergence(df_secilen)
+
+            hedef_fiyat, stop_loss = _hedef_ve_stop_hesapla(df_secilen, son_s)
+
+            _, direnc_seviyeleri, destek_seviyeleri, _ = _destek_direnc_seviyeleri(
+                df_secilen, gun_sayisi=120, guncel_fiyat_override=son_s['Close']
+            )
+
+            adx_deger = son_s.get('ADX_14')
+            di_plus = son_s.get('DMP_14')
+            di_minus = son_s.get('DMN_14')
+            hacim_teyidi_oran = _hacim_teyidi(df_secilen)
+            fibonacci = _fibonacci_seviyeleri(df_secilen)
+            trend_okumasi = _trend_okumasi(ema_durum, st_durum, di_plus, di_minus)
+
+            veri_baglami = build_veri_baglami(
+                secilen_hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_durum, finansal_durum,
+                momentum_10g, fark, divergence, hedef_fiyat, stop_loss,
+                fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka,
+                karsilastirma_satirlari, direnc_seviyeleri, destek_seviyeleri,
+                adx_deger, di_plus, di_minus, hacim_teyidi_oran, fibonacci, trend_okumasi
+            )
+            veri_baglami_claude = build_veri_baglami(
+                secilen_hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_durum, finansal_durum,
+                momentum_10g, fark, divergence, hedef_fiyat, stop_loss,
+                fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka,
+                karsilastirma_satirlari, direnc_seviyeleri, destek_seviyeleri,
+                trend=trend_okumasi, claude_icin_kisitli=True
+            )
+
+            if trend_okumasi:
+                renk = "#22c55e" if trend_okumasi['yon'] == "Yükseliş" else ("#ef4444" if trend_okumasi['yon'] == "Düşüş" else "#eab308")
+                st.markdown(
+                    f"<div class='risk-alarm' style='border-color:{renk}; background: rgba(0,0,0,0.15);'>"
+                    f"📊 <b>Trend Okuması:</b> {trend_okumasi['yon']} "
+                    f"({trend_okumasi['al_sayisi']}/{trend_okumasi['toplam']} iç ölçüt uyumlu)</div>",
+                    unsafe_allow_html=True
+                )
+                st.caption(
+                    "ℹ️ Trend okuması, ADX, hacim teyidi, destek/direnç ve Fibonacci seviyeleri destekleyici "
+                    "bağlamdır — geçmiş veriyle test edilmemiştir. Sadece aşağıdaki 'Sinyal Performans "
+                    "Karşılaştırması' tablosundaki SuperTrend/Optimize/Squeeze sinyalleri geçmiş veriyle test edilmiştir."
+                )
+
+        with st.expander("🏛️ Bağımsız Araştırma Raporu (Claude)", expanded=False):
+            claude_client = get_anthropic_client()
+            ust_akil_key = f"claude_rapor_{secilen_ticker}"
+            if claude_client is None:
+                st.info("Bu özellik için proje kök dizinindeki .env dosyasına ANTHROPIC_API_KEY eklemen gerekiyor.")
+            elif veri_baglami_claude is not None:
+                if st.button("🔍 Claude ile Bağımsız Araştırma Yap", key=f"claude_btn_{secilen_ticker}"):
+                    with st.spinner("Claude web'de araştırma yapıyor ve rapor hazırlıyor... (bir dakika kadar sürebilir)"):
+                        claude_rapor, claude_hata = claude_ust_akil_raporu(veri_baglami_claude, secilen_hisse_adi)
+                        if claude_hata:
+                            st.error(claude_hata)
+                        else:
+                            st.session_state[ust_akil_key] = claude_rapor
+                if st.session_state.get(ust_akil_key):
+                    with st.container(border=True):
+                        st.markdown(st.session_state[ust_akil_key])
+                    st.caption("⚠️ Bu rapor yapay zeka tarafından üretilmiştir, yatırım tavsiyesi değildir.")
+            else:
+                st.info("Bu hisse için veri yüklenemedi.")
+
+        rapor_key = f"gemini_rapor_{secilen_ticker}"
+
+        if gemini_client is not None and veri_baglami is not None:
+            baslat_tiklandi = st.button("🧠 Gemini Analizini Başlat", key=f"rapor_baslat_{secilen_ticker}")
+            if baslat_tiklandi:
+                rapor_prompt = f"""{ANALIST_PERSONA}
+
+    Aşağıdaki güncel piyasa verilerine dayanarak {secilen_hisse_adi} hissesi için TÜRKÇE, uzun ve derinlemesine bir analiz raporu yaz. Rapor TAM OLARAK şu 5 başlığı bu sırayla, aynen bu şekilde (emojili ve iki nokta üst üste ile) kullanmalı; her başlığın altında en az 3-4 cümlelik, veriye dayalı, doğrudan ve sert bir analiz olmalı:
+
+    📊 Trend ve İvme Analizi:
+    🎯 Osilatör ve Güç Kontrolü:
+    💸 Temel Analiz ve Değerleme Özeti:
+    🗺️ Yol Haritası (Destek/Direnç ve Kırılım Noktaları):
+    🚨 Son Karar ve Risk Alarmı:
+
+    Kurallar:
+    - "Temel Analiz ve Değerleme Özeti" bölümünde, veri bağlamında Cari Oran veya Net Borç/FAVÖK yoksa bunlardan hiç bahsetme; sadece F/K, PD/DD ve ROE üzerinden yorum yap.
+    - "Yol Haritası" bölümünde veri bağlamındaki Direnç ve Destek Seviyelerini birebir kullan: en yakın direncin üzerinde kırılım olursa fiyatın hangi seviyeye (bir sonraki dirence) doğru hareket edebileceğini, en yakın desteğin altında kırılım olursa hangi seviyeye kadar sarkabileceğini somut TL rakamlarıyla söyle. Uydurma seviye kullanma, sadece verilenleri kullan.
+    - "Son Karar ve Risk Alarmı" bölümünde asla yuvarlak, muğlak cümle kurma; riskleri ve tuzakları doğrudan söyle.
+    - Kesin "al/sat" emri verme ama net bir yönelim ve gerekçe sun.
+    - Her başlığın altında EN FAZLA 2-3 kısa cümle yaz. Uzun, süslü, edebi cümle kurma; bir çalışanın yöneticisine sözlü rapor verir gibi kısa ve net konuş. Sıfat yığma, benzetme yapma, doğrudan olguyu ve sonucu söyle.
+
+    Veri Bağlamı:
+    {veri_baglami}
+    """
+                with st.spinner("Gemini derinlemesine analiz ediyor..."):
+                    try:
+                        response = gemini_client.models.generate_content(model=GEMINI_MODEL, contents=rapor_prompt)
+                        st.session_state[rapor_key] = response.text
+                    except Exception as e:
+                        st.session_state[rapor_key] = None
+                        st.error(f"Gemini isteği başarısız oldu: {e}")
+
+            if st.session_state.get(rapor_key):
                 with st.container(border=True):
-                    st.markdown(st.session_state[ust_akil_key])
-                st.caption("⚠️ Bu rapor yapay zeka tarafından üretilmiştir, yatırım tavsiyesi değildir.")
-        else:
-            st.info("Bu hisse için veri yüklenemedi.")
-
-    rapor_key = f"gemini_rapor_{secilen_ticker}"
-
-    if gemini_client is not None and veri_baglami is not None:
-        baslat_tiklandi = st.button("🧠 Gemini Analizini Başlat", key=f"rapor_baslat_{secilen_ticker}")
-        if baslat_tiklandi:
-            rapor_prompt = f"""{ANALIST_PERSONA}
-
-Aşağıdaki güncel piyasa verilerine dayanarak {secilen_hisse_adi} hissesi için TÜRKÇE, uzun ve derinlemesine bir analiz raporu yaz. Rapor TAM OLARAK şu 5 başlığı bu sırayla, aynen bu şekilde (emojili ve iki nokta üst üste ile) kullanmalı; her başlığın altında en az 3-4 cümlelik, veriye dayalı, doğrudan ve sert bir analiz olmalı:
-
-📊 Trend ve İvme Analizi:
-🎯 Osilatör ve Güç Kontrolü:
-💸 Temel Analiz ve Değerleme Özeti:
-🗺️ Yol Haritası (Destek/Direnç ve Kırılım Noktaları):
-🚨 Son Karar ve Risk Alarmı:
-
-Kurallar:
-- "Temel Analiz ve Değerleme Özeti" bölümünde, veri bağlamında Cari Oran veya Net Borç/FAVÖK yoksa bunlardan hiç bahsetme; sadece F/K, PD/DD ve ROE üzerinden yorum yap.
-- "Yol Haritası" bölümünde veri bağlamındaki Direnç ve Destek Seviyelerini birebir kullan: en yakın direncin üzerinde kırılım olursa fiyatın hangi seviyeye (bir sonraki dirence) doğru hareket edebileceğini, en yakın desteğin altında kırılım olursa hangi seviyeye kadar sarkabileceğini somut TL rakamlarıyla söyle. Uydurma seviye kullanma, sadece verilenleri kullan.
-- "Son Karar ve Risk Alarmı" bölümünde asla yuvarlak, muğlak cümle kurma; riskleri ve tuzakları doğrudan söyle.
-- Kesin "al/sat" emri verme ama net bir yönelim ve gerekçe sun.
-- Her başlığın altında EN FAZLA 2-3 kısa cümle yaz. Uzun, süslü, edebi cümle kurma; bir çalışanın yöneticisine sözlü rapor verir gibi kısa ve net konuş. Sıfat yığma, benzetme yapma, doğrudan olguyu ve sonucu söyle.
-
-Veri Bağlamı:
-{veri_baglami}
-"""
-            with st.spinner("Gemini derinlemesine analiz ediyor..."):
-                try:
-                    response = gemini_client.models.generate_content(model=GEMINI_MODEL, contents=rapor_prompt)
-                    st.session_state[rapor_key] = response.text
-                except Exception as e:
-                    st.session_state[rapor_key] = None
-                    st.error(f"Gemini isteği başarısız oldu: {e}")
-
-        if st.session_state.get(rapor_key):
+                    st.markdown(st.session_state[rapor_key])
+        elif veri_baglami is not None:
+            st.info("Gemini derin analiz raporu için proje kök dizinindeki .env dosyasına GEMINI_API_KEY eklemen gerekiyor. Aşağıda temel kural tabanlı özet gösteriliyor.")
             with st.container(border=True):
-                st.markdown(st.session_state[rapor_key])
-    elif veri_baglami is not None:
-        st.info("Gemini derin analiz raporu için proje kök dizinindeki .env dosyasına GEMINI_API_KEY eklemen gerekiyor. Aşağıda temel kural tabanlı özet gösteriliyor.")
-        with st.container(border=True):
-            st.markdown(
-                f"**Strateji:** {karar}  \n"
-                f"**Güven Skoru:** %{int(skor)}  \n"
-                f"**EMA200 Durumu:** {ema_durum}  \n"
-                f"**RSI (14):** {rsi_deger:.2f} ({rsi_durum})  \n"
-                f"**SuperTrend:** {st_durum}  \n"
-                f"**Finansal Sağlık:** {finansal_durum}"
-            )
-    else:
-        st.warning("Bu hisse için veri yüklenemedi.")
+                st.markdown(
+                    f"**Strateji:** {karar}  \n"
+                    f"**Güven Skoru:** %{int(skor)}  \n"
+                    f"**EMA200 Durumu:** {ema_durum}  \n"
+                    f"**RSI (14):** {rsi_deger:.2f} ({rsi_durum})  \n"
+                    f"**SuperTrend:** {st_durum}  \n"
+                    f"**Finansal Sağlık:** {finansal_durum}"
+                )
+        else:
+            st.warning("Bu hisse için veri yüklenemedi.")
 
-    st.markdown("<div class='fintables-header'>📊 FINTABLES TEMEL ANALİZ ÖZETİ</div>", unsafe_allow_html=True)
+        st.markdown("<div class='fintables-header'>📊 TEMEL ANALİZ ÖZETİ</div>", unsafe_allow_html=True)
 
-    temel_veriler = [
-        ("F/K Oranı", fmt(fk)),
-        ("Fiyat / Defter Değeri (PD/DD)", fmt(pddd)),
-    ]
-    if not is_banka:
-        temel_veriler.append(("Cari Oran", fmt(cari_oran)))
-        temel_veriler.append(("Net Borç / FAVÖK", fmt(net_borc_favok)))
-    temel_veriler.append(("Özsermaye Kârlılığı (ROE)", fmt(roe * 100 if roe is not None else None, suffix='%')))
+        temel_veriler = [
+            ("F/K Oranı", fmt(fk)),
+            ("Fiyat / Defter Değeri (PD/DD)", fmt(pddd)),
+        ]
+        if not is_banka:
+            temel_veriler.append(("Cari Oran", fmt(cari_oran)))
+            temel_veriler.append(("Net Borç / FAVÖK", fmt(net_borc_favok)))
+        temel_veriler.append(("Özsermaye Kârlılığı (ROE)", fmt(roe * 100 if roe is not None else None, suffix='%')))
 
-    tablo_satirlari = "".join(f"<tr><td>{anahtar}</td><td>{deger}</td></tr>" for anahtar, deger in temel_veriler)
-    st.markdown(f"<table class='fin-table'><tbody>{tablo_satirlari}</tbody></table>", unsafe_allow_html=True)
+        tablo_satirlari = "".join(f"<tr><td>{anahtar}</td><td>{deger}</td></tr>" for anahtar, deger in temel_veriler)
+        st.markdown(f"<table class='fin-table'><tbody>{tablo_satirlari}</tbody></table>", unsafe_allow_html=True)
 
-    if finansal_risk:
-        risk_nedenleri = []
-        if cari_oran is not None and cari_oran < 1:
-            risk_nedenleri.append("Cari Oran 1'in altında (likidite riski)")
-        if net_borc_favok is not None and net_borc_favok > 4:
-            risk_nedenleri.append("Net Borç/FAVÖK 4'ün üzerinde (borçluluk riski)")
+        if finansal_risk:
+            risk_nedenleri = []
+            if cari_oran is not None and cari_oran < 1:
+                risk_nedenleri.append("Cari Oran 1'in altında (likidite riski)")
+            if net_borc_favok is not None and net_borc_favok > 4:
+                risk_nedenleri.append("Net Borç/FAVÖK 4'ün üzerinde (borçluluk riski)")
 
-        st.markdown(f"""
-        <div class='risk-alarm'>
-            <b style='color:#ef4444;'>🚨 RİSK ALARMI</b><br>
-            {'; '.join(risk_nedenleri)}.
-        </div>
-        """, unsafe_allow_html=True)
+            st.markdown(f"""
+            <div class='risk-alarm'>
+                <b style='color:#ef4444;'>🚨 RİSK ALARMI</b><br>
+                {'; '.join(risk_nedenleri)}.
+            </div>
+            """, unsafe_allow_html=True)
 
-    st.markdown("<div class='fintables-header'>💬 CANLI SORU-CEVAP</div>", unsafe_allow_html=True)
+        st.markdown("<div class='fintables-header'>💬 CANLI SORU-CEVAP</div>", unsafe_allow_html=True)
 
-    groq_client = get_groq_client()
+        groq_client = get_groq_client()
 
-    if groq_client is not None and veri_baglami is not None:
-        messages_key = f"messages_{secilen_ticker}"
+        if groq_client is not None and veri_baglami is not None:
+            messages_key = f"messages_{secilen_ticker}"
 
-        if messages_key not in st.session_state:
-            st.session_state[messages_key] = []
+            if messages_key not in st.session_state:
+                st.session_state[messages_key] = []
 
-        sohbet_kutusu = st.container(height=420, border=True)
+            sohbet_kutusu = st.container(height=420, border=True)
 
-        with sohbet_kutusu:
-            for msg in st.session_state[messages_key]:
-                with st.chat_message(msg["role"]):
-                    st.markdown(msg["content"])
+            with sohbet_kutusu:
+                for msg in st.session_state[messages_key]:
+                    with st.chat_message(msg["role"]):
+                        st.markdown(msg["content"])
 
-            kullanici_sorusu = st.chat_input("Kanka, bu hissenin teknik görünümünü bir de bana sor...")
-            if kullanici_sorusu:
-                st.session_state[messages_key].append({"role": "user", "content": kullanici_sorusu})
-                with st.chat_message("user"):
-                    st.markdown(kullanici_sorusu)
-                with st.chat_message("assistant"):
-                    with st.spinner("Analiz ediliyor..."):
-                        try:
-                            sistem_mesaji = (
-                                f"{ANALIST_PERSONA}\n\nGüncel Veri Bağlamı:\n{veri_baglami}\n\n"
-                                "Yukarıdaki bağlamda olmayan ortalama hacim, ortalama fiyat, en yüksek/düşük "
-                                "seviye veya volatilite gibi hesaplanabilir bir şey sorulursa ASLA tahmin etme; "
-                                "hisse_istatistigi_hesapla aracını çağırarak gerçek veriden hesapla. Destek, direnç "
-                                "veya kritik teknik seviye sorulursa destek_direnc_hesapla aracını çağır. Güncel haber, "
-                                "KAP bildirimi, sektör bilgisi veya sitedeki veri setinde hiç olmayan genel bir şey "
-                                "sorulursa web_arama_yap aracını çağırarak internetten araştır."
-                            )
-                            groq_mesajlari = [{"role": "system", "content": sistem_mesaji}] + st.session_state[messages_key]
-
-                            asistan_mesaji = None
-                            for _ in range(3):
-                                completion = groq_client.chat.completions.create(
-                                    model=GROQ_MODEL,
-                                    messages=groq_mesajlari,
-                                    tools=GROQ_ARAC_TANIMLARI,
-                                    tool_choice="auto",
+                kullanici_sorusu = st.chat_input("Kanka, bu hissenin teknik görünümünü bir de bana sor...")
+                if kullanici_sorusu:
+                    st.session_state[messages_key].append({"role": "user", "content": kullanici_sorusu})
+                    with st.chat_message("user"):
+                        st.markdown(kullanici_sorusu)
+                    with st.chat_message("assistant"):
+                        with st.spinner("Analiz ediliyor..."):
+                            try:
+                                sistem_mesaji = (
+                                    f"{ANALIST_PERSONA}\n\nGüncel Veri Bağlamı:\n{veri_baglami}\n\n"
+                                    "Yukarıdaki bağlamda olmayan ortalama hacim, ortalama fiyat, en yüksek/düşük "
+                                    "seviye veya volatilite gibi hesaplanabilir bir şey sorulursa ASLA tahmin etme; "
+                                    "hisse_istatistigi_hesapla aracını çağırarak gerçek veriden hesapla. Destek, direnç "
+                                    "veya kritik teknik seviye sorulursa destek_direnc_hesapla aracını çağır. Güncel haber, "
+                                    "KAP bildirimi, sektör bilgisi veya sitedeki veri setinde hiç olmayan genel bir şey "
+                                    "sorulursa web_arama_yap aracını çağırarak internetten araştır."
                                 )
-                                asistan_mesaji = completion.choices[0].message
+                                groq_mesajlari = [{"role": "system", "content": sistem_mesaji}] + st.session_state[messages_key]
 
-                                if asistan_mesaji.tool_calls:
-                                    groq_mesajlari.append(asistan_mesaji)
-                                    for tool_call in asistan_mesaji.tool_calls:
-                                        args = json.loads(tool_call.function.arguments or "{}")
-                                        if tool_call.function.name == "web_arama_yap":
+                                asistan_mesaji = None
+                                for _ in range(3):
+                                    completion = groq_client.chat.completions.create(
+                                        model=GROQ_MODEL,
+                                        messages=groq_mesajlari,
+                                        tools=GROQ_ARAC_TANIMLARI,
+                                        tool_choice="auto",
+                                    )
+                                    asistan_mesaji = completion.choices[0].message
+
+                                    if asistan_mesaji.tool_calls:
+                                        groq_mesajlari.append(asistan_mesaji)
+                                        for tool_call in asistan_mesaji.tool_calls:
+                                            args = json.loads(tool_call.function.arguments or "{}")
+                                            if tool_call.function.name == "web_arama_yap":
+                                                sonuc = web_arama_yap(args.get("sorgu", ""))
+                                            elif tool_call.function.name == "destek_direnc_hesapla":
+                                                sonuc = destek_direnc_hesapla(df_secilen, args.get("gun_sayisi", 120))
+                                            else:
+                                                sonuc = hisse_istatistigi_hesapla(
+                                                    df_secilen, args.get("metrik", ""), args.get("gun_sayisi", 30)
+                                                )
+                                            groq_mesajlari.append({
+                                                "role": "tool",
+                                                "tool_call_id": tool_call.id,
+                                                "content": sonuc,
+                                            })
+                                        continue
+
+                                    # Bazı modeller ara sıra gerçek tool_calls yerine fonksiyon çağrısını
+                                    # düz metin olarak sızdırıyor (<function=...>...</function>). Bunu
+                                    # yakalayıp kullanıcıya çiğ metin göstermeden aracı biz çalıştırıyoruz.
+                                    sizinti = _sizinti_arac_cagrisini_yakala(asistan_mesaji.content)
+                                    if sizinti:
+                                        arac_adi, args = sizinti
+                                        if arac_adi == "web_arama_yap":
                                             sonuc = web_arama_yap(args.get("sorgu", ""))
-                                        elif tool_call.function.name == "destek_direnc_hesapla":
+                                        elif arac_adi == "destek_direnc_hesapla":
                                             sonuc = destek_direnc_hesapla(df_secilen, args.get("gun_sayisi", 120))
                                         else:
                                             sonuc = hisse_istatistigi_hesapla(
                                                 df_secilen, args.get("metrik", ""), args.get("gun_sayisi", 30)
                                             )
+                                        groq_mesajlari.append({"role": "assistant", "content": asistan_mesaji.content})
                                         groq_mesajlari.append({
-                                            "role": "tool",
-                                            "tool_call_id": tool_call.id,
-                                            "content": sonuc,
+                                            "role": "user",
+                                            "content": (
+                                                f"Araç sonucu: {sonuc}\n\nBuna dayanarak soruyu normal, düz metinle "
+                                                "cevapla; fonksiyon çağrısı söz dizimi (<function=...>) kullanma."
+                                            ),
                                         })
-                                    continue
+                                        continue
 
-                                # Bazı modeller ara sıra gerçek tool_calls yerine fonksiyon çağrısını
-                                # düz metin olarak sızdırıyor (<function=...>...</function>). Bunu
-                                # yakalayıp kullanıcıya çiğ metin göstermeden aracı biz çalıştırıyoruz.
-                                sizinti = _sizinti_arac_cagrisini_yakala(asistan_mesaji.content)
-                                if sizinti:
-                                    arac_adi, args = sizinti
-                                    if arac_adi == "web_arama_yap":
-                                        sonuc = web_arama_yap(args.get("sorgu", ""))
-                                    elif arac_adi == "destek_direnc_hesapla":
-                                        sonuc = destek_direnc_hesapla(df_secilen, args.get("gun_sayisi", 120))
-                                    else:
-                                        sonuc = hisse_istatistigi_hesapla(
-                                            df_secilen, args.get("metrik", ""), args.get("gun_sayisi", 30)
-                                        )
-                                    groq_mesajlari.append({"role": "assistant", "content": asistan_mesaji.content})
-                                    groq_mesajlari.append({
-                                        "role": "user",
-                                        "content": (
-                                            f"Araç sonucu: {sonuc}\n\nBuna dayanarak soruyu normal, düz metinle "
-                                            "cevapla; fonksiyon çağrısı söz dizimi (<function=...>) kullanma."
-                                        ),
-                                    })
-                                    continue
+                                    break
 
-                                break
-
-                            cevap_metni = asistan_mesaji.content or "Bir cevap üretemedim."
-                            st.markdown(cevap_metni)
-                            st.session_state[messages_key].append({"role": "assistant", "content": cevap_metni})
-                        except Exception as e:
-                            st.error(f"Groq isteği başarısız oldu: {e}")
-    else:
-        st.info("Canlı soru-cevap için proje kök dizinindeki .env dosyasına GROQ_API_KEY eklemen gerekiyor.")
+                                cevap_metni = asistan_mesaji.content or "Bir cevap üretemedim."
+                                st.markdown(cevap_metni)
+                                st.session_state[messages_key].append({"role": "assistant", "content": cevap_metni})
+                            except Exception as e:
+                                st.error(f"Groq isteği başarısız oldu: {e}")
+        else:
+            st.info("Canlı soru-cevap için proje kök dizinindeki .env dosyasına GROQ_API_KEY eklemen gerekiyor.")
