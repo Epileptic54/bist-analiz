@@ -306,18 +306,9 @@ def _fibonacci_seviyeleri(df, gun_sayisi=120):
     return {'tepe': tepe, 'dip': dip, 'seviyeler': seviyeler, 'yon': 'yukselen' if yon_yukselen else 'dusen'}
 
 
-def _trend_okumasi(ema_durum, st_durum, di_plus, di_minus):
-    puanlar = []
-    if ema_durum:
-        puanlar.append(1 if ('Üstü' in ema_durum or 'Boğa' in ema_durum) else -1)
-    if st_durum:
-        puanlar.append(1 if 'AL' in st_durum else -1)
-    if di_plus is not None and di_minus is not None:
-        puanlar.append(1 if di_plus > di_minus else -1)
-
+def _vade_ozet(puanlar, gun):
     if not puanlar:
-        return None
-
+        return {'gun': gun, 'yon': None, 'al_sayisi': 0, 'toplam': 0}
     al_sayisi = sum(1 for p in puanlar if p == 1)
     toplam = len(puanlar)
     if al_sayisi > toplam / 2:
@@ -326,7 +317,55 @@ def _trend_okumasi(ema_durum, st_durum, di_plus, di_minus):
         yon = "Düşüş"
     else:
         yon = "Karışık"
-    return {'al_sayisi': al_sayisi, 'toplam': toplam, 'yon': yon}
+    return {'gun': gun, 'yon': yon, 'al_sayisi': al_sayisi, 'toplam': toplam}
+
+
+def _zaman_dilimi_analizi(df, son_s, momentum_10g):
+    # KISA VADE (10 gün): momentum yönü, StochRSI %K (>50/<50), MACD histogram işareti — hepsi hızlı/reaktif
+    kisa_puanlar = []
+    if momentum_10g is not None:
+        kisa_puanlar.append(1 if momentum_10g > 0 else -1)
+    stoch_k_col = next((c for c in df.columns if c.startswith('STOCHRSIk')), None)
+    stoch_k_deger = son_s.get(stoch_k_col) if stoch_k_col else None
+    if stoch_k_deger is not None and pd.notna(stoch_k_deger):
+        kisa_puanlar.append(1 if stoch_k_deger > 50 else -1)
+    macd_hist = son_s.get('MACDh_12_26_9')
+    if macd_hist is not None and pd.notna(macd_hist):
+        kisa_puanlar.append(1 if macd_hist > 0 else -1)
+    kisa_vade = _vade_ozet(kisa_puanlar, 10)
+
+    # ORTA VADE (50 gün): EMA50-vs-fiyat, 50 günlük momentum, ADX DI+/DI- yönü
+    orta_puanlar = []
+    ema50 = son_s.get('EMA_50')
+    if ema50 is not None and pd.notna(ema50):
+        orta_puanlar.append(1 if son_s['Close'] > ema50 else -1)
+    momentum_50g = None
+    if len(df) > 50:
+        momentum_50g = ((son_s['Close'] / df['Close'].iloc[-51]) - 1) * 100
+        orta_puanlar.append(1 if momentum_50g > 0 else -1)
+    di_plus, di_minus = son_s.get('DMP_14'), son_s.get('DMN_14')
+    if di_plus is not None and di_minus is not None and pd.notna(di_plus) and pd.notna(di_minus):
+        orta_puanlar.append(1 if di_plus > di_minus else -1)
+    orta_vade = _vade_ozet(orta_puanlar, 50)
+    orta_vade['momentum'] = momentum_50g
+
+    # UZUN VADE (200 gün): EMA200-vs-fiyat, SuperTrend yönü, 200 günlük momentum
+    uzun_puanlar = []
+    ema200 = son_s.get('EMA_200')
+    if ema200 is not None and pd.notna(ema200):
+        uzun_puanlar.append(1 if son_s['Close'] > ema200 else -1)
+    st_col = next((c for c in df.columns if c.startswith('SUPERTd')), None)
+    st_deger = son_s.get(st_col) if st_col else None
+    if st_deger is not None and pd.notna(st_deger):
+        uzun_puanlar.append(1 if st_deger == 1 else -1)
+    momentum_200g = None
+    if len(df) > 200:
+        momentum_200g = ((son_s['Close'] / df['Close'].iloc[-201]) - 1) * 100
+        uzun_puanlar.append(1 if momentum_200g > 0 else -1)
+    uzun_vade = _vade_ozet(uzun_puanlar, 200)
+    uzun_vade['momentum'] = momentum_200g
+
+    return {'kisa_vade': kisa_vade, 'orta_vade': orta_vade, 'uzun_vade': uzun_vade}
 
 
 @st.cache_resource
@@ -846,7 +885,7 @@ def build_veri_baglami(hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_dur
                         fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka,
                         sinyal_karsilastirma=None, direnc_seviyeleri=None, destek_seviyeleri=None,
                         adx_deger=None, di_plus=None, di_minus=None, hacim_teyidi_oran=None,
-                        fibonacci=None, trend=None, portfoy_pozisyonu=None, claude_icin_kisitli=False):
+                        fibonacci=None, zaman_dilimi=None, portfoy_pozisyonu=None, claude_icin_kisitli=False):
     if portfoy_pozisyonu:
         kar_zarar_tl = f"{portfoy_pozisyonu['kar_zarar']:+,.2f}".replace(',', '.')
         portfoy_satiri = (
@@ -863,11 +902,23 @@ def build_veri_baglami(hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_dur
         f"EMA200 Durumu: {ema_durum}",
         f"RSI (14): {rsi_deger:.2f} ({rsi_durum})",
         f"SuperTrend: {st_durum}",
-        f"Trend Okuması: "
-        + (f"{trend['al_sayisi']}/{trend['toplam']} iç ölçüt {trend['yon']} yönlü "
-           "(EMA200/SuperTrend/ADX — üçü de aynı fiyat serisinden türetilen korelasyonlu "
-           "trend ölçütleridir, bağımsız kanıt olarak görme)"
-           if trend else "Belirlenemedi"),
+    ]
+    if zaman_dilimi:
+        kisa, orta, uzun = zaman_dilimi['kisa_vade'], zaman_dilimi['orta_vade'], zaman_dilimi['uzun_vade']
+        satirlar.append(
+            f"Kısa Vade Trend (10 gün): {kisa['yon'] or 'Belirlenemedi'} ({kisa['al_sayisi']}/{kisa['toplam']} ölçüt)"
+        )
+        satirlar.append(
+            f"Orta Vade Trend (50 gün): {orta['yon'] or 'Belirlenemedi'} ({orta['al_sayisi']}/{orta['toplam']} ölçüt), "
+            f"50 günlük momentum: {fmt(orta['momentum'], '%')}"
+        )
+        satirlar.append(
+            f"Uzun Vade Trend (200 gün): {uzun['yon'] or 'Belirlenemedi'} ({uzun['al_sayisi']}/{uzun['toplam']} ölçüt), "
+            f"200 günlük momentum: {fmt(uzun['momentum'], '%')}"
+        )
+    else:
+        satirlar.append("Kısa/Orta/Uzun Vade Trend: Belirlenemedi")
+    satirlar += [
         f"10 Günlük Momentum: {fmt(momentum_10g, '%')}",
         f"BIST100'e Göre Göreli Güç Farkı: {fmt(fark, ' puan') if fark is not None else 'Veri Yok'}",
         f"RSI Uyuşmazlığı: {divergence or 'Yok'}",
@@ -1165,20 +1216,18 @@ with tab3:
 
             bbu_col = next((c for c in df_gorunum.columns if c.startswith('BBU_20')), None)
             bbl_col = next((c for c in df_gorunum.columns if c.startswith('BBL_20')), None)
-            bbb_col = next((c for c in df_gorunum.columns if c.startswith('BBB_20')), None)
 
             fig = make_subplots(
-                rows=4, cols=1,
+                rows=3, cols=1,
                 shared_xaxes=True,
                 vertical_spacing=0.025,
-                row_heights=[0.40, 0.20, 0.20, 0.20],
-                specs=[[{"secondary_y": True}], [{}], [{}], [{}]]
+                row_heights=[0.5, 0.25, 0.25],
+                specs=[[{"secondary_y": True}], [{}], [{}]]
             )
 
             y1_top = fig.layout.yaxis.domain[1]
             y2_top = fig.layout.yaxis3.domain[1]
             y3_top = fig.layout.yaxis4.domain[1]
-            y4_top = fig.layout.yaxis5.domain[1]
 
             # 0. Hacim (Volume) - fiyat panelinin arkasında yarı saydam
             hacim_renkleri = [
@@ -1279,17 +1328,6 @@ with tab3:
                 fig.add_shape(type="line", x0=df_gorunum['Date'].min(), y0=70, x1=df_gorunum['Date'].max(), y1=70, line=dict(color="#ef4444", dash="dash", width=1), row=3, col=1)
                 fig.add_shape(type="line", x0=df_gorunum['Date'].min(), y0=30, x1=df_gorunum['Date'].max(), y1=30, line=dict(color="#22c55e", dash="dash", width=1), row=3, col=1)
 
-            stochrsi_k_col = next((c for c in df_gorunum.columns if c.startswith('STOCHRSIk')), None)
-            stochrsi_d_col = next((c for c in df_gorunum.columns if c.startswith('STOCHRSId')), None)
-            if stochrsi_k_col:
-                fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum[stochrsi_k_col], name='StochRSI %K', legend='legend3', line=dict(color='#0284c7', width=1, dash='dot')), row=3, col=1)
-            if stochrsi_d_col:
-                fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum[stochrsi_d_col], name='StochRSI %D', legend='legend3', line=dict(color='#f59e0b', width=1, dash='dot')), row=3, col=1)
-
-            # 4. Bollinger Bandwidth Paneli
-            if bbb_col:
-                fig.add_trace(go.Scatter(x=df_gorunum['Date'], y=df_gorunum[bbb_col], name='BB Bandwidth', legend='legend4', line=dict(color='#eab308', width=1.3), fill='tozeroy', fillcolor='rgba(234,179,8,0.08)'), row=4, col=1)
-
             legend_style = dict(orientation='h', bgcolor='rgba(0,0,0,0)', bordercolor='rgba(0,0,0,0)', font=dict(size=9, color=TEXT_COLOR), tracegroupgap=6)
 
             fig.update_layout(
@@ -1304,12 +1342,10 @@ with tab3:
                 legend=dict(x=0.005, y=y1_top - 0.015, xanchor='left', yanchor='top', **legend_style),
                 legend2=dict(x=0.005, y=y2_top - 0.02, xanchor='left', yanchor='top', **legend_style),
                 legend3=dict(x=0.005, y=y3_top - 0.02, xanchor='left', yanchor='top', **legend_style),
-                legend4=dict(x=0.005, y=y4_top - 0.02, xanchor='left', yanchor='top', **legend_style),
             )
             fig.update_xaxes(gridcolor=GRID_COLOR, showticklabels=False, row=1, col=1)
             fig.update_xaxes(gridcolor=GRID_COLOR, showticklabels=False, row=2, col=1)
-            fig.update_xaxes(gridcolor=GRID_COLOR, showticklabels=False, row=3, col=1)
-            fig.update_xaxes(gridcolor=GRID_COLOR, showticklabels=True, row=4, col=1)
+            fig.update_xaxes(gridcolor=GRID_COLOR, showticklabels=True, row=3, col=1)
             fig.update_yaxes(gridcolor=GRID_COLOR)
             st.plotly_chart(fig, use_container_width=True)
 
@@ -1421,7 +1457,7 @@ with tab3:
             di_minus = son_s.get('DMN_14')
             hacim_teyidi_oran = _hacim_teyidi(df_secilen)
             fibonacci = _fibonacci_seviyeleri(df_secilen)
-            trend_okumasi = _trend_okumasi(ema_durum, st_durum, di_plus, di_minus)
+            zaman_dilimi = _zaman_dilimi_analizi(df_secilen, son_s, momentum_10g)
 
             portfoy_pozisyonu = None
             mevcut_pf_kaydi = portfoy.get(secilen_ticker)
@@ -1443,7 +1479,7 @@ with tab3:
                 momentum_10g, fark, divergence, hedef_fiyat, stop_loss,
                 fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka,
                 karsilastirma_satirlari, direnc_seviyeleri, destek_seviyeleri,
-                adx_deger, di_plus, di_minus, hacim_teyidi_oran, fibonacci, trend_okumasi,
+                adx_deger, di_plus, di_minus, hacim_teyidi_oran, fibonacci, zaman_dilimi,
                 portfoy_pozisyonu
             )
             veri_baglami_claude = build_veri_baglami(
@@ -1451,20 +1487,35 @@ with tab3:
                 momentum_10g, fark, divergence, hedef_fiyat, stop_loss,
                 fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka,
                 karsilastirma_satirlari, direnc_seviyeleri, destek_seviyeleri,
-                trend=trend_okumasi, portfoy_pozisyonu=portfoy_pozisyonu, claude_icin_kisitli=True
+                zaman_dilimi=zaman_dilimi, portfoy_pozisyonu=portfoy_pozisyonu, claude_icin_kisitli=True
             )
 
-            if trend_okumasi:
-                renk = "#22c55e" if trend_okumasi['yon'] == "Yükseliş" else ("#ef4444" if trend_okumasi['yon'] == "Düşüş" else "#eab308")
-                st.markdown(
-                    f"<div class='risk-alarm' style='border-color:{renk}; background: rgba(0,0,0,0.15);'>"
-                    f"📊 <b>Trend Okuması:</b> {trend_okumasi['yon']} "
-                    f"({trend_okumasi['al_sayisi']}/{trend_okumasi['toplam']} iç ölçüt uyumlu)</div>",
-                    unsafe_allow_html=True
-                )
+            if zaman_dilimi:
+                vade_cols = st.columns(3)
+                vade_bilgi = [
+                    ("Kısa Vade", zaman_dilimi['kisa_vade']),
+                    ("Orta Vade", zaman_dilimi['orta_vade']),
+                    ("Uzun Vade", zaman_dilimi['uzun_vade']),
+                ]
+                for col, (etiket, veri) in zip(vade_cols, vade_bilgi):
+                    with col:
+                        if veri['yon']:
+                            renk = "#22c55e" if veri['yon'] == "Yükseliş" else ("#ef4444" if veri['yon'] == "Düşüş" else "#eab308")
+                            st.markdown(
+                                f"<div class='risk-alarm' style='border-color:{renk}; background: rgba(0,0,0,0.15); text-align:center;'>"
+                                f"<b>{etiket} ({veri['gun']} gün)</b><br>"
+                                f"<span style='color:{renk}; font-size:1.15em;'>{veri['yon']}</span><br>"
+                                f"<span style='font-size:0.8em;'>{veri['al_sayisi']}/{veri['toplam']} ölçüt uyumlu</span></div>",
+                                unsafe_allow_html=True
+                            )
+                        else:
+                            st.markdown(
+                                f"<div class='risk-alarm' style='text-align:center;'><b>{etiket} ({veri['gun']} gün)</b><br>Belirlenemedi</div>",
+                                unsafe_allow_html=True
+                            )
                 st.caption(
-                    "ℹ️ Trend okuması, ADX, hacim teyidi, destek/direnç ve Fibonacci seviyeleri destekleyici "
-                    "bağlamdır — geçmiş veriyle test edilmemiştir. Sadece aşağıdaki 'Sinyal Performans "
+                    "ℹ️ Kısa/Orta/Uzun Vade Trend Analizi, ADX, hacim teyidi, destek/direnç ve Fibonacci seviyeleri "
+                    "destekleyici bağlamdır — geçmiş veriyle test edilmemiştir. Sadece aşağıdaki 'Sinyal Performans "
                     "Karşılaştırması' tablosundaki SuperTrend/Optimize/Squeeze sinyalleri geçmiş veriyle test edilmiştir."
                 )
 
