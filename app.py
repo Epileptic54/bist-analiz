@@ -846,10 +846,20 @@ def build_veri_baglami(hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_dur
                         fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka,
                         sinyal_karsilastirma=None, direnc_seviyeleri=None, destek_seviyeleri=None,
                         adx_deger=None, di_plus=None, di_minus=None, hacim_teyidi_oran=None,
-                        fibonacci=None, trend=None, claude_icin_kisitli=False):
+                        fibonacci=None, trend=None, portfoy_pozisyonu=None, claude_icin_kisitli=False):
+    if portfoy_pozisyonu:
+        kar_zarar_tl = f"{portfoy_pozisyonu['kar_zarar']:+,.2f}".replace(',', '.')
+        portfoy_satiri = (
+            f"{portfoy_pozisyonu['adet']:.0f} adet, {portfoy_pozisyonu['maliyet']:.2f} TL ortalama maliyetle elde "
+            f"tutuluyor, güncel kâr/zarar {portfoy_pozisyonu['kar_zarar_yuzde']:+.1f}% ({kar_zarar_tl} TL)"
+        )
+    else:
+        portfoy_satiri = "Bu hissede pozisyon yok"
+
     satirlar = [
         f"Hisse: {hisse_adi}",
         f"Güncel Fiyat: {son_s['Close']:.2f} TL",
+        f"Portföy Pozisyonu: {portfoy_satiri}",
         f"EMA200 Durumu: {ema_durum}",
         f"RSI (14): {rsi_deger:.2f} ({rsi_durum})",
         f"SuperTrend: {st_durum}",
@@ -1413,19 +1423,35 @@ with tab3:
             fibonacci = _fibonacci_seviyeleri(df_secilen)
             trend_okumasi = _trend_okumasi(ema_durum, st_durum, di_plus, di_minus)
 
+            portfoy_pozisyonu = None
+            mevcut_pf_kaydi = portfoy.get(secilen_ticker)
+            if mevcut_pf_kaydi:
+                pf_adet_sec = mevcut_pf_kaydi['adet']
+                pf_maliyet_sec = mevcut_pf_kaydi['maliyet']
+                pf_pozisyon_maliyeti_sec = pf_adet_sec * pf_maliyet_sec
+                pf_pozisyon_degeri_sec = pf_adet_sec * son_s['Close']
+                pf_kar_zarar_sec = pf_pozisyon_degeri_sec - pf_pozisyon_maliyeti_sec
+                portfoy_pozisyonu = {
+                    'adet': pf_adet_sec,
+                    'maliyet': pf_maliyet_sec,
+                    'kar_zarar': pf_kar_zarar_sec,
+                    'kar_zarar_yuzde': (pf_kar_zarar_sec / pf_pozisyon_maliyeti_sec * 100) if pf_pozisyon_maliyeti_sec else 0,
+                }
+
             veri_baglami = build_veri_baglami(
                 secilen_hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_durum, finansal_durum,
                 momentum_10g, fark, divergence, hedef_fiyat, stop_loss,
                 fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka,
                 karsilastirma_satirlari, direnc_seviyeleri, destek_seviyeleri,
-                adx_deger, di_plus, di_minus, hacim_teyidi_oran, fibonacci, trend_okumasi
+                adx_deger, di_plus, di_minus, hacim_teyidi_oran, fibonacci, trend_okumasi,
+                portfoy_pozisyonu
             )
             veri_baglami_claude = build_veri_baglami(
                 secilen_hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_durum, finansal_durum,
                 momentum_10g, fark, divergence, hedef_fiyat, stop_loss,
                 fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka,
                 karsilastirma_satirlari, direnc_seviyeleri, destek_seviyeleri,
-                trend=trend_okumasi, claude_icin_kisitli=True
+                trend=trend_okumasi, portfoy_pozisyonu=portfoy_pozisyonu, claude_icin_kisitli=True
             )
 
             if trend_okumasi:
