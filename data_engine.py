@@ -38,6 +38,30 @@ def _atr(high, low, close, length=10):
     return tr.ewm(alpha=1 / length, adjust=False).mean()
 
 
+def _adx(high, low, close, length=14):
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = ((up_move > down_move) & (up_move > 0)) * up_move
+    minus_dm = ((down_move > up_move) & (down_move > 0)) * down_move
+    plus_dm = plus_dm.clip(lower=0)
+    minus_dm = minus_dm.clip(lower=0)
+
+    atr = _atr(high, low, close, length)
+    plus_dm_smooth = plus_dm.ewm(alpha=1 / length, adjust=False).mean()
+    minus_dm_smooth = minus_dm.ewm(alpha=1 / length, adjust=False).mean()
+
+    plus_di = 100 * (plus_dm_smooth / atr)
+    minus_di = 100 * (minus_dm_smooth / atr)
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
+    adx = dx.ewm(alpha=1 / length, adjust=False).mean()
+    return plus_di, minus_di, adx
+
+
+def _obv(close, volume):
+    yon = close.diff().apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
+    return (yon * volume).fillna(0).cumsum()
+
+
 def _supertrend(df, length=10, multiplier=3):
     high, low, close = df['High'], df['Low'], df['Close']
     atr = _atr(high, low, close, length)
@@ -152,6 +176,13 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     squeeze_al, squeeze_sat = _squeeze_breakout(df['Close'], bbu, bbl, bbb)
     df['Squeeze_AL'] = squeeze_al
     df['Squeeze_SAT'] = squeeze_sat
+
+    plus_di, minus_di, adx = _adx(df['High'], df['Low'], df['Close'], 14)
+    df['DMP_14'] = plus_di
+    df['DMN_14'] = minus_di
+    df['ADX_14'] = adx
+
+    df['OBV'] = _obv(df['Close'], df['Volume'])
 
     return df
 

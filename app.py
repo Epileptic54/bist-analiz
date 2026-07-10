@@ -257,6 +257,39 @@ def destek_direnc_hesapla(df, gun_sayisi=120):
     return "\n".join(satirlar)
 
 
+def _hacim_teyidi(df, gun=5, referans=20):
+    if 'Volume' not in df.columns or len(df) < gun + referans:
+        return None
+    son_ort = df['Volume'].tail(gun).mean()
+    onceki_ort = df['Volume'].iloc[-(gun + referans):-gun].mean()
+    if onceki_ort == 0:
+        return None
+    return son_ort / onceki_ort
+
+
+def _hacim_teyidi_etiket(oran):
+    if oran is None:
+        return "Veri Yok"
+    if oran > 1.2:
+        return f"Güçlü Hacim Teyidi (son {oran:.1f}x)"
+    if oran < 0.8:
+        return f"Zayıf Hacim ({oran:.1f}x)"
+    return f"Normal ({oran:.1f}x)"
+
+
+def _fibonacci_seviyeleri(df, gun_sayisi=120):
+    gun_sayisi = max(20, min(int(gun_sayisi or 120), len(df)))
+    veri = df.tail(gun_sayisi)
+    tepe, dip = veri['High'].max(), veri['Low'].min()
+    fark = tepe - dip
+    if fark <= 0:
+        return None
+    yon_yukselen = veri['Close'].iloc[-1] >= veri['Close'].iloc[0]
+    oranlar = [0.236, 0.382, 0.5, 0.618, 0.786]
+    seviyeler = {o: (tepe - fark * o if yon_yukselen else dip + fark * o) for o in oranlar}
+    return {'tepe': tepe, 'dip': dip, 'seviyeler': seviyeler, 'yon': 'yukselen' if yon_yukselen else 'dusen'}
+
+
 @st.cache_resource
 def get_tavily_client():
     if not TAVILY_API_KEY or "buraya" in TAVILY_API_KEY:
@@ -723,11 +756,49 @@ def sinyal_performansi(df, al_kosulu, sat_kosulu, son_kac_sinyal=10):
     }
 
 
+def _hedef_ve_stop_hesapla(df, son_s):
+    bbu_col = next((c for c in df.columns if c.startswith('BBU_20')), None)
+    direnc = df['High'].rolling(60, min_periods=1).max().iloc[-1]
+    hedef_fiyat = max(son_s[bbu_col], direnc) if bbu_col else direnc
+    stop_loss = son_s['EMA_200']
+    return hedef_fiyat, stop_loss
+
+
+def _pozisyon_disiplin_kontrolu(df_pf, guncel_fiyat):
+    if df_pf is None or df_pf.empty or 'EMA_200' not in df_pf.columns:
+        return None
+    hedef_fiyat, stop_loss = _hedef_ve_stop_hesapla(df_pf, df_pf.iloc[-1])
+    if guncel_fiyat <= stop_loss:
+        return ('stop', stop_loss)
+    if guncel_fiyat >= hedef_fiyat:
+        return ('hedef', hedef_fiyat)
+    return None
+
+
+def _portfoy_risk_uyarilari(pf_ham_veri, toplam_deger, yogunlasma_esigi=0.35, min_cesitlilik=3):
+    uyarilar = []
+    if toplam_deger > 0:
+        for p in pf_ham_veri:
+            oran = p['pozisyon_degeri'] / toplam_deger
+            if oran > yogunlasma_esigi:
+                uyarilar.append(
+                    f"⚠️ {p['ad']}, portföyünün %{oran * 100:.0f}'ini oluşturuyor "
+                    f"(önerilen üst sınır: %{yogunlasma_esigi * 100:.0f})."
+                )
+    if 0 < len(pf_ham_veri) < min_cesitlilik:
+        uyarilar.append(
+            f"⚠️ Portföyünde sadece {len(pf_ham_veri)} pozisyon var — az sayıda hisseye "
+            f"yoğunlaşmak tek bir hissedeki olumsuz haberin toplam etkisini artırır."
+        )
+    return uyarilar
+
 
 def build_veri_baglami(hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_durum, finansal_durum,
                         momentum_10g, fark, divergence, hedef_fiyat, stop_loss,
                         fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka,
-                        sinyal_karsilastirma=None, direnc_seviyeleri=None, destek_seviyeleri=None):
+                        sinyal_karsilastirma=None, direnc_seviyeleri=None, destek_seviyeleri=None,
+                        adx_deger=None, di_plus=None, di_minus=None, hacim_teyidi_oran=None,
+                        fibonacci=None, claude_icin_kisitli=False):
     satirlar = [
         f"Hisse: {hisse_adi}",
         f"Güncel Fiyat: {son_s['Close']:.2f} TL",
@@ -746,6 +817,17 @@ def build_veri_baglami(hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_dur
         f"F/K Oranı: {fmt(fk)}",
         f"PD/DD: {fmt(pddd)}",
     ]
+    if not claude_icin_kisitli:
+        satirlar.append(
+            f"ADX (Trend Gücü, 14): {fmt(adx_deger)}"
+            + (f" (+DI: {fmt(di_plus)}, -DI: {fmt(di_minus)})" if adx_deger is not None else "")
+        )
+        satirlar.append(f"Hacim Teyidi: {_hacim_teyidi_etiket(hacim_teyidi_oran)}")
+        if fibonacci:
+            fib_metni = ", ".join(f"%{o*100:.1f}: {v:.2f} TL" for o, v in sorted(fibonacci['seviyeler'].items()))
+            satirlar.append(f"Fibonacci Geri Çekilme Seviyeleri ({fibonacci['yon']} hareket, son 120 gün): {fib_metni}")
+        else:
+            satirlar.append("Fibonacci Geri Çekilme Seviyeleri: Belirlenemedi")
     if not is_banka:
         satirlar.append(f"Cari Oran: {fmt(cari_oran)}")
         satirlar.append(f"Net Borç/FAVÖK: {fmt(net_borc_favok)}")
@@ -908,6 +990,8 @@ if not portfoy:
     st.info("Henüz portföyüne bir pozisyon eklemedin. Yukarıdaki 'Pozisyon Ekle / Güncelle' kısmından başlayabilirsin.")
 else:
     pf_satirlari = []
+    pf_ham_veri = []
+    pf_disiplin_uyarilari = []
     toplam_maliyet = 0.0
     toplam_deger = 0.0
     for ticker_db, bilgi in portfoy.items():
@@ -926,6 +1010,15 @@ else:
 
         toplam_maliyet += pozisyon_maliyeti
         toplam_deger += pozisyon_degeri
+        pf_ham_veri.append({'ad': ad, 'pozisyon_degeri': pozisyon_degeri, 'guncel_fiyat': guncel_fiyat, 'ticker_db': ticker_db})
+
+        disiplin = _pozisyon_disiplin_kontrolu(df_pf, guncel_fiyat)
+        if disiplin:
+            tur, seviye = disiplin
+            if tur == 'stop':
+                pf_disiplin_uyarilari.append(('kirmizi', f"🔴 {ad}: fiyat stop-loss seviyesinin ({seviye:.2f} TL) altına indi."))
+            else:
+                pf_disiplin_uyarilari.append(('yesil', f"🟢 {ad}: fiyat hedef seviyeye ({seviye:.2f} TL) ulaştı, kâr realizasyonunu değerlendir."))
 
         pf_satirlari.append({
             'Hisse': ad,
@@ -948,6 +1041,16 @@ else:
             st.metric("Güncel Değer", f"{toplam_deger:,.2f} TL".replace(',', '.'))
         with ozet_cols[2]:
             st.metric("Toplam Kâr/Zarar", f"{toplam_kz:,.2f} TL".replace(',', '.'), delta=f"{toplam_kz_yuzde:+.1f}%")
+
+        yogunlasma_uyarilari = _portfoy_risk_uyarilari(pf_ham_veri, toplam_deger)
+        for uyari in yogunlasma_uyarilari:
+            st.markdown(f"<div class='risk-alarm'>{uyari}</div>", unsafe_allow_html=True)
+        for renk, uyari in pf_disiplin_uyarilari:
+            if renk == 'kirmizi':
+                st.markdown(f"<div class='risk-alarm'>{uyari}</div>", unsafe_allow_html=True)
+            else:
+                st.markdown(f"<div class='risk-alarm' style='border-color:#22c55e; background: rgba(34,197,94,0.12);'>{uyari}</div>", unsafe_allow_html=True)
+        st.caption(f"ℹ️ Disiplin kuralı: tek pozisyon portföyün %35'ini (≈ {toplam_deger * 0.35:,.2f} TL) geçmemesi önerilir.".replace(',', '.'))
 
 st.markdown("---")
 
@@ -1164,6 +1267,7 @@ with col_right:
 
     gemini_client = get_gemini_client()
     veri_baglami = None
+    veri_baglami_claude = None
     karar = skor = ema_durum = rsi_durum = st_durum = finansal_durum = None
     rsi_deger = None
 
@@ -1222,19 +1326,31 @@ with col_right:
 
         divergence = detect_rsi_divergence(df_secilen)
 
-        direnc = df_secilen['High'].rolling(60, min_periods=1).max().iloc[-1]
-        hedef_fiyat = max(son_s[bbu_col], direnc) if bbu_col else direnc
-        stop_loss = son_s['EMA_200']
+        hedef_fiyat, stop_loss = _hedef_ve_stop_hesapla(df_secilen, son_s)
 
         _, direnc_seviyeleri, destek_seviyeleri, _ = _destek_direnc_seviyeleri(
             df_secilen, gun_sayisi=120, guncel_fiyat_override=son_s['Close']
         )
 
+        adx_deger = son_s.get('ADX_14')
+        di_plus = son_s.get('DMP_14')
+        di_minus = son_s.get('DMN_14')
+        hacim_teyidi_oran = _hacim_teyidi(df_secilen)
+        fibonacci = _fibonacci_seviyeleri(df_secilen)
+
         veri_baglami = build_veri_baglami(
             secilen_hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_durum, finansal_durum,
             momentum_10g, fark, divergence, hedef_fiyat, stop_loss,
             fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka,
-            karsilastirma_satirlari, direnc_seviyeleri, destek_seviyeleri
+            karsilastirma_satirlari, direnc_seviyeleri, destek_seviyeleri,
+            adx_deger, di_plus, di_minus, hacim_teyidi_oran, fibonacci
+        )
+        veri_baglami_claude = build_veri_baglami(
+            secilen_hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_durum, finansal_durum,
+            momentum_10g, fark, divergence, hedef_fiyat, stop_loss,
+            fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka,
+            karsilastirma_satirlari, direnc_seviyeleri, destek_seviyeleri,
+            claude_icin_kisitli=True
         )
 
     with st.expander("🏛️ Üst Akıl: Bağımsız Yatırım Bankası Raporu (Claude)", expanded=False):
@@ -1242,10 +1358,10 @@ with col_right:
         ust_akil_key = f"claude_rapor_{secilen_ticker}"
         if claude_client is None:
             st.info("Bu özellik için proje kök dizinindeki .env dosyasına ANTHROPIC_API_KEY eklemen gerekiyor.")
-        elif veri_baglami is not None:
+        elif veri_baglami_claude is not None:
             if st.button("🔍 Claude ile Bağımsız Araştırma Yap", key=f"claude_btn_{secilen_ticker}"):
                 with st.spinner("Claude web'de araştırma yapıyor ve rapor hazırlıyor... (bir dakika kadar sürebilir)"):
-                    claude_rapor, claude_hata = claude_ust_akil_raporu(veri_baglami, secilen_hisse_adi)
+                    claude_rapor, claude_hata = claude_ust_akil_raporu(veri_baglami_claude, secilen_hisse_adi)
                     if claude_hata:
                         st.error(claude_hata)
                     else:
