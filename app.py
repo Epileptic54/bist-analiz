@@ -3,6 +3,7 @@ import os
 import re
 import sqlite3
 import time
+from datetime import datetime
 
 import anthropic
 import pandas as pd
@@ -390,6 +391,18 @@ def _zaman_dilimi_analizi(df, son_s, momentum_10g):
     return {'kisa_vade': kisa_vade, 'orta_vade': orta_vade, 'uzun_vade': uzun_vade}
 
 
+def _vade_celiskisi_kontrolu(zaman_dilimi):
+    kisa = zaman_dilimi['kisa_vade']['yon']
+    uzun = zaman_dilimi['uzun_vade']['yon']
+    if kisa not in ("Yükseliş", "Düşüş") or uzun not in ("Yükseliş", "Düşüş") or kisa == uzun:
+        return None
+    if kisa == "Düşüş" and uzun == "Yükseliş":
+        return ("Kısa vadede (10 gün) zayıflık var ama uzun vadeli (200 gün) trend hâlâ yükseliş yönünde — "
+                "bu genel yükseliş trendi içinde kısa vadeli bir düzeltme (pullback) olabilir.")
+    return ("Kısa vadede (10 gün) toparlanma var ama uzun vadeli (200 gün) trend hâlâ düşüş yönünde — "
+            "bu bir 'tuzak rallisi' (bear market rally) olabilir, temkinli ol.")
+
+
 @st.cache_resource
 def get_tavily_client():
     if not TAVILY_API_KEY or "buraya" in TAVILY_API_KEY:
@@ -540,17 +553,20 @@ def load_data(ticker):
 def get_canli_fiyat(ticker_db):
     """yfinance gunluk mum verisi (history) gecikmeli/eksik olabildigi icin
     (Yahoo bazen o gunun OHLC'sini NaN birakiyor), gercek son fiyati
-    fast_info uzerinden ceker. Basarisiz olursa (None, None) doner."""
+    fast_info uzerinden ceker. Basarisiz olursa (None, None, None) doner.
+    Ucuncu deger, bu fiyatin kontrol edildigi saat (HH:MM) - cache nedeniyle
+    en fazla 60 saniyede bir gerceklesir."""
     yf_symbol = ticker_db.replace('_', '.')
     try:
         fi = yf.Ticker(yf_symbol).fast_info
         son_fiyat = fi.get('lastPrice') if hasattr(fi, 'get') else fi.last_price
         onceki_kapanis = fi.get('previousClose') if hasattr(fi, 'get') else fi.previous_close
         if son_fiyat is None or onceki_kapanis is None:
-            return None, None
-        return round(float(son_fiyat), 2), round(float(onceki_kapanis), 2)
+            return None, None, None
+        saat = datetime.now().strftime("%H:%M")
+        return round(float(son_fiyat), 2), round(float(onceki_kapanis), 2), saat
     except Exception:
-        return None, None
+        return None, None, None
 
 
 @st.cache_data(ttl=3600)
@@ -943,6 +959,9 @@ def build_veri_baglami(hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_dur
             "StochRSI/MACD/ADX/SuperTrend değerleri ise son tamamlanmış kapanışa göre hesaplanmıştır — "
             "bu iki tür veri farklı zaman noktalarına ait, karıştırma."
         )
+        celiski = _vade_celiskisi_kontrolu(zaman_dilimi)
+        if celiski:
+            satirlar.append(f"Vade Çelişkisi Uyarısı: {celiski}")
     else:
         satirlar.append("Kısa/Orta/Uzun Vade Trend: Belirlenemedi")
     satirlar += [
@@ -1007,7 +1026,7 @@ with st.spinner("Takip listesi taranıyor..."):
 
         son = df_t.iloc[-1]
         onceki = df_t.iloc[-2]
-        canli_fiyat_t, canli_onceki_t = get_canli_fiyat(ticker_db)
+        canli_fiyat_t, canli_onceki_t, _ = get_canli_fiyat(ticker_db)
         if canli_fiyat_t is not None:
             fiyat_gosterim = canli_fiyat_t
             degisim = ((canli_fiyat_t - canli_onceki_t) / canli_onceki_t) * 100
@@ -1062,7 +1081,7 @@ if portfoy:
             df_pf = load_data(ticker_db)
             if df_pf is None or df_pf.empty:
                 continue
-            canli_fiyat_pf, _ = get_canli_fiyat(ticker_db)
+            canli_fiyat_pf, _, _ = get_canli_fiyat(ticker_db)
             guncel_fiyat = canli_fiyat_pf if canli_fiyat_pf is not None else df_pf['Close'].iloc[-1]
             ad = hisseler.get(ticker_db, ticker_db)
             adet = bilgi['adet']
@@ -1130,19 +1149,21 @@ with tab1:
             if df is not None and not df.empty and len(df) >= 2:
                 son_satir = df.iloc[-1]
                 onceki_satir = df.iloc[-2]
-                canli_fiyat, canli_onceki_kapanis = get_canli_fiyat(ticker_db)
+                canli_fiyat, canli_onceki_kapanis, canli_saat = get_canli_fiyat(ticker_db)
                 if canli_fiyat is not None:
                     fiyat = canli_fiyat
                     yuzde_degisim = round(((fiyat - canli_onceki_kapanis) / canli_onceki_kapanis) * 100, 2)
                 else:
                     fiyat = round(son_satir['Close'], 2)
                     yuzde_degisim = round(((fiyat - onceki_satir['Close']) / onceki_satir['Close']) * 100, 2)
+                    canli_saat = None
 
                 prefix = "+" if yuzde_degisim > 0 else ""
+                saat_etiketi = f" · {canli_saat}" if canli_saat else ""
 
                 with cols[index]:
                     st.metric(
-                        label=f"{name} ({ticker_db.replace('_IS', '')})",
+                        label=f"{name} ({ticker_db.replace('_IS', '')}){saat_etiketi}",
                         value=f"{fiyat} TL",
                         delta=f"{prefix}{yuzde_degisim}%"
                     )
@@ -1422,9 +1443,10 @@ with tab3:
 
         if df_secilen is not None and not df_secilen.empty:
             son_s = df_secilen.iloc[-1].copy()
-            canli_fiyat_secilen, _ = get_canli_fiyat(secilen_ticker)
+            canli_fiyat_secilen, _, canli_saat_secilen = get_canli_fiyat(secilen_ticker)
             if canli_fiyat_secilen is not None:
                 son_s['Close'] = canli_fiyat_secilen
+                st.caption(f"Güncel Fiyat: {son_s['Close']:.2f} TL · {canli_saat_secilen}")
 
             bogalar = 0
             toplam_kriter = 5
@@ -1556,6 +1578,13 @@ with tab3:
                     "geçmiş veriyle test edilmemiştir. Sadece aşağıdaki 'Sinyal Performans Karşılaştırması' tablosundaki "
                     "SuperTrend/Optimize/Squeeze sinyalleri geçmiş veriyle test edilmiştir."
                 )
+                celiski = _vade_celiskisi_kontrolu(zaman_dilimi)
+                if celiski:
+                    st.markdown(
+                        f"<div class='risk-alarm' style='border-color:#eab308; background: rgba(234,179,8,0.12);'>"
+                        f"⚠️ <b>Vade Çelişkisi:</b> {celiski}</div>",
+                        unsafe_allow_html=True
+                    )
 
         with st.expander("🏛️ Bağımsız Araştırma Raporu (Claude)", expanded=False):
             claude_client = get_anthropic_client()
