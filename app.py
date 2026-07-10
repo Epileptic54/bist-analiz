@@ -110,15 +110,15 @@ En fazla 2 web araması yap; sadece en kritik güncel gelişmeyi ve analist hede
         return None, f"Claude isteği başarısız oldu: {e}"
 
 
-GADDAR_PERSONA = (
-    "Sen 25 yillik tecrubeye sahip, gaddar, asiri mukemmeliyetci, lafini hic esirgemeyen, "
-    "veri odakli kidemli bir BIST finans analistisin. Kullaniciyi yumusak, muglak cumlelerle "
-    "oyalamazsin; riskleri ve zayifliklari dogrudan, sert bir dille soylersin. Her iddiani "
-    "sana verilen sayisal veriye dayandirirsin, veride olmayan hicbir seyi uydurmazsin. "
-    "Samimi ama profesyonelsin, kesinlikle Turkce konusursun ve asla kesin 'al/sat' emri vermezsin, "
-    "sadece net bir yonelim ve gerekce sunarsin. Uslubun bir yatirimciya sozlu rapor sunan bir "
-    "calisan gibi: kisa, duz, sade cumleler kurarsin. Edebi benzetme, suslu sifat veya 'adeta', "
-    "'sanki', 'bir senfoni gibi' turunden cilali ifadeler kullanmazsin — sadece olguyu ve sonucu soylersin."
+ANALIST_PERSONA = (
+    "Sen 25 yillik tecrubeye sahip, disiplinli ve dogrudan konusan kidemli bir BIST finans "
+    "analistisin. Kullaniciyi yumusak, muglak cumlelerle oyalamazsin; riskleri ve zayifliklari "
+    "acik ve net bir dille soylersin. Her iddiani sana verilen sayisal veriye dayandirirsin, "
+    "veride olmayan hicbir seyi uydurmazsin. Samimi ama profesyonelsin, kesinlikle Turkce "
+    "konusursun ve asla kesin 'al/sat' emri vermezsin, sadece net bir yonelim ve gerekce sunarsin. "
+    "Uslubun bir yatirimciya sozlu rapor sunan bir calisan gibi: kisa, duz, sade cumleler "
+    "kurarsin. Edebi benzetme, suslu sifat veya 'adeta', 'sanki', 'bir senfoni gibi' turunden "
+    "cilali ifadeler kullanmazsin — sadece olguyu ve sonucu soylersin."
 )
 
 GROQ_ARAC_TANIMLARI = [
@@ -288,6 +288,31 @@ def _fibonacci_seviyeleri(df, gun_sayisi=120):
     oranlar = [0.236, 0.382, 0.5, 0.618, 0.786]
     seviyeler = {o: (tepe - fark * o if yon_yukselen else dip + fark * o) for o in oranlar}
     return {'tepe': tepe, 'dip': dip, 'seviyeler': seviyeler, 'yon': 'yukselen' if yon_yukselen else 'dusen'}
+
+
+def _sinyal_konsensusu(ema_durum, rsi_deger, st_durum, di_plus, di_minus):
+    puanlar = []
+    if ema_durum:
+        puanlar.append(1 if ('Üstü' in ema_durum or 'Boğa' in ema_durum) else -1)
+    if rsi_deger is not None:
+        puanlar.append(1 if rsi_deger >= 50 else -1)
+    if st_durum:
+        puanlar.append(1 if 'AL' in st_durum else -1)
+    if di_plus is not None and di_minus is not None:
+        puanlar.append(1 if di_plus > di_minus else -1)
+
+    if not puanlar:
+        return None
+
+    al_sayisi = sum(1 for p in puanlar if p == 1)
+    toplam = len(puanlar)
+    if al_sayisi > toplam / 2:
+        yon = "Yükseliş"
+    elif al_sayisi < toplam / 2:
+        yon = "Düşüş"
+    else:
+        yon = "Kararsız"
+    return {'al_sayisi': al_sayisi, 'toplam': toplam, 'yon': yon}
 
 
 @st.cache_resource
@@ -608,8 +633,8 @@ def html_tablo(satirlar):
 
 baslik_col, buton_col = st.columns([5, 1])
 with baslik_col:
-    st.title("🤖 BIST Yapay Zekâ Yatırım Danışmanlığı & Karar Destek Terminali")
-    st.markdown("*Teknik Analiz Üst Seviye Strateji Odası*")
+    st.title("📊 BIST Analiz Paneli")
+    st.markdown("*Kişisel teknik ve temel analiz aracı*")
 with buton_col:
     st.write("")
     st.write("")
@@ -757,10 +782,19 @@ def sinyal_performansi(df, al_kosulu, sat_kosulu, son_kac_sinyal=10):
 
 
 def _hedef_ve_stop_hesapla(df, son_s):
-    bbu_col = next((c for c in df.columns if c.startswith('BBU_20')), None)
-    direnc = df['High'].rolling(60, min_periods=1).max().iloc[-1]
-    hedef_fiyat = max(son_s[bbu_col], direnc) if bbu_col else direnc
-    stop_loss = son_s['EMA_200']
+    guncel_fiyat = son_s['Close']
+    _, direnc_seviyeleri, destek_seviyeleri, _ = _destek_direnc_seviyeleri(
+        df, gun_sayisi=120, guncel_fiyat_override=guncel_fiyat
+    )
+
+    if direnc_seviyeleri:
+        hedef_fiyat = direnc_seviyeleri[0]
+    else:
+        bbu_col = next((c for c in df.columns if c.startswith('BBU_20')), None)
+        direnc_60g = df['High'].rolling(60, min_periods=1).max().iloc[-1]
+        hedef_fiyat = max(son_s[bbu_col], direnc_60g) if bbu_col else direnc_60g
+
+    stop_loss = destek_seviyeleri[0] if destek_seviyeleri else son_s['EMA_200']
     return hedef_fiyat, stop_loss
 
 
@@ -798,13 +832,17 @@ def build_veri_baglami(hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_dur
                         fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka,
                         sinyal_karsilastirma=None, direnc_seviyeleri=None, destek_seviyeleri=None,
                         adx_deger=None, di_plus=None, di_minus=None, hacim_teyidi_oran=None,
-                        fibonacci=None, claude_icin_kisitli=False):
+                        fibonacci=None, konsensus=None, claude_icin_kisitli=False):
     satirlar = [
         f"Hisse: {hisse_adi}",
         f"Güncel Fiyat: {son_s['Close']:.2f} TL",
         f"EMA200 Durumu: {ema_durum}",
         f"RSI (14): {rsi_deger:.2f} ({rsi_durum})",
         f"SuperTrend: {st_durum}",
+        f"Sinyal Konsensüsü: "
+        + (f"{konsensus['al_sayisi']}/{konsensus['toplam']} gösterge {konsensus['yon']} yönlü — "
+           f"göstergeler birbiriyle çelişiyorsa bunu net şekilde belirt, tek bir göstergeye aşırı ağırlık verme."
+           if konsensus else "Belirlenemedi"),
         f"10 Günlük Momentum: {fmt(momentum_10g, '%')}",
         f"BIST100'e Göre Göreli Güç Farkı: {fmt(fark, ' puan') if fark is not None else 'Veri Yok'}",
         f"RSI Uyuşmazlığı: {divergence or 'Yok'}",
@@ -812,8 +850,8 @@ def build_veri_baglami(hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_dur
         + (", ".join(f"{d:.2f} TL" for d in direnc_seviyeleri) if direnc_seviyeleri else "Belirlenemedi"),
         f"Destek Seviyeleri (yakından uzağa, kırılırsa aşağı hareket hızlanır): "
         + (", ".join(f"{d:.2f} TL" for d in destek_seviyeleri) if destek_seviyeleri else "Belirlenemedi"),
-        f"Matematiksel Hedef Fiyat: {hedef_fiyat:.2f} TL",
-        f"Stop-Loss (EMA200): {stop_loss:.2f} TL",
+        f"Hedef Fiyat (En Yakın Direnç Bazlı, yoksa Bollinger/60g üst bant): {hedef_fiyat:.2f} TL",
+        f"Stop-Loss (En Yakın Destek Bazlı, yoksa EMA200): {stop_loss:.2f} TL",
         f"F/K Oranı: {fmt(fk)}",
         f"PD/DD: {fmt(pddd)}",
     ]
@@ -1337,23 +1375,33 @@ with col_right:
         di_minus = son_s.get('DMN_14')
         hacim_teyidi_oran = _hacim_teyidi(df_secilen)
         fibonacci = _fibonacci_seviyeleri(df_secilen)
+        konsensus = _sinyal_konsensusu(ema_durum, rsi_deger, st_durum, di_plus, di_minus)
 
         veri_baglami = build_veri_baglami(
             secilen_hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_durum, finansal_durum,
             momentum_10g, fark, divergence, hedef_fiyat, stop_loss,
             fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka,
             karsilastirma_satirlari, direnc_seviyeleri, destek_seviyeleri,
-            adx_deger, di_plus, di_minus, hacim_teyidi_oran, fibonacci
+            adx_deger, di_plus, di_minus, hacim_teyidi_oran, fibonacci, konsensus
         )
         veri_baglami_claude = build_veri_baglami(
             secilen_hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_durum, finansal_durum,
             momentum_10g, fark, divergence, hedef_fiyat, stop_loss,
             fk, pddd, cari_oran, net_borc_favok, roe, karar, skor, is_banka,
             karsilastirma_satirlari, direnc_seviyeleri, destek_seviyeleri,
-            claude_icin_kisitli=True
+            konsensus=konsensus, claude_icin_kisitli=True
         )
 
-    with st.expander("🏛️ Üst Akıl: Bağımsız Yatırım Bankası Raporu (Claude)", expanded=False):
+        if konsensus:
+            renk = "#22c55e" if konsensus['yon'] == "Yükseliş" else ("#ef4444" if konsensus['yon'] == "Düşüş" else "#eab308")
+            st.markdown(
+                f"<div class='risk-alarm' style='border-color:{renk}; background: rgba(0,0,0,0.15);'>"
+                f"📊 Sinyal Konsensüsü: {konsensus['al_sayisi']}/{konsensus['toplam']} gösterge "
+                f"<b>{konsensus['yon']}</b> yönlü</div>",
+                unsafe_allow_html=True
+            )
+
+    with st.expander("🏛️ Bağımsız Araştırma Raporu (Claude)", expanded=False):
         claude_client = get_anthropic_client()
         ust_akil_key = f"claude_rapor_{secilen_ticker}"
         if claude_client is None:
@@ -1378,18 +1426,18 @@ with col_right:
     if gemini_client is not None and veri_baglami is not None:
         baslat_tiklandi = st.button("🧠 Gemini Analizini Başlat", key=f"rapor_baslat_{secilen_ticker}")
         if baslat_tiklandi:
-            rapor_prompt = f"""{GADDAR_PERSONA}
+            rapor_prompt = f"""{ANALIST_PERSONA}
 
 Aşağıdaki güncel piyasa verilerine dayanarak {secilen_hisse_adi} hissesi için TÜRKÇE, uzun ve derinlemesine bir analiz raporu yaz. Rapor TAM OLARAK şu 5 başlığı bu sırayla, aynen bu şekilde (emojili ve iki nokta üst üste ile) kullanmalı; her başlığın altında en az 3-4 cümlelik, veriye dayalı, doğrudan ve sert bir analiz olmalı:
 
 📊 Trend ve İvme Analizi:
 🎯 Osilatör ve Güç Kontrolü:
-💸 Fintables Temel Analiz Süzgeci:
+💸 Temel Analiz ve Değerleme Özeti:
 🗺️ Yol Haritası (Destek/Direnç ve Kırılım Noktaları):
 🚨 Son Karar ve Risk Alarmı:
 
 Kurallar:
-- "Fintables Temel Analiz Süzgeci" bölümünde, veri bağlamında Cari Oran veya Net Borç/FAVÖK yoksa bunlardan hiç bahsetme; sadece F/K, PD/DD ve ROE üzerinden yorum yap.
+- "Temel Analiz ve Değerleme Özeti" bölümünde, veri bağlamında Cari Oran veya Net Borç/FAVÖK yoksa bunlardan hiç bahsetme; sadece F/K, PD/DD ve ROE üzerinden yorum yap.
 - "Yol Haritası" bölümünde veri bağlamındaki Direnç ve Destek Seviyelerini birebir kullan: en yakın direncin üzerinde kırılım olursa fiyatın hangi seviyeye (bir sonraki dirence) doğru hareket edebileceğini, en yakın desteğin altında kırılım olursa hangi seviyeye kadar sarkabileceğini somut TL rakamlarıyla söyle. Uydurma seviye kullanma, sadece verilenleri kullan.
 - "Son Karar ve Risk Alarmı" bölümünde asla yuvarlak, muğlak cümle kurma; riskleri ve tuzakları doğrudan söyle.
 - Kesin "al/sat" emri verme ama net bir yönelim ve gerekçe sun.
@@ -1477,7 +1525,7 @@ Veri Bağlamı:
                     with st.spinner("Analiz ediliyor..."):
                         try:
                             sistem_mesaji = (
-                                f"{GADDAR_PERSONA}\n\nGüncel Veri Bağlamı:\n{veri_baglami}\n\n"
+                                f"{ANALIST_PERSONA}\n\nGüncel Veri Bağlamı:\n{veri_baglami}\n\n"
                                 "Yukarıdaki bağlamda olmayan ortalama hacim, ortalama fiyat, en yüksek/düşük "
                                 "seviye veya volatilite gibi hesaplanabilir bir şey sorulursa ASLA tahmin etme; "
                                 "hisse_istatistigi_hesapla aracını çağırarak gerçek veriden hesapla. Destek, direnç "
