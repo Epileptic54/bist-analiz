@@ -320,50 +320,72 @@ def _vade_ozet(puanlar, gun):
     return {'gun': gun, 'yon': yon, 'al_sayisi': al_sayisi, 'toplam': toplam}
 
 
+def _bilesen_ekle(puanlar, bilesenler, yon, ad, deger, veri_tabani):
+    puanlar.append(yon)
+    bilesenler.append({
+        'ad': ad, 'deger': deger, 'yon': 'Yükseliş' if yon == 1 else 'Düşüş',
+        'veri_tabani': veri_tabani,
+    })
+
+
 def _zaman_dilimi_analizi(df, son_s, momentum_10g):
+    guncel_fiyat = son_s['Close']
+
     # KISA VADE (10 gün): momentum yönü, StochRSI %K (>50/<50), MACD histogram işareti — hepsi hızlı/reaktif
-    kisa_puanlar = []
+    kisa_puanlar, kisa_bilesenler = [], []
     if momentum_10g is not None:
-        kisa_puanlar.append(1 if momentum_10g > 0 else -1)
+        _bilesen_ekle(kisa_puanlar, kisa_bilesenler, 1 if momentum_10g > 0 else -1,
+                      '10 Günlük Momentum', f"{momentum_10g:+.2f}%", 'anlık fiyat')
     stoch_k_col = next((c for c in df.columns if c.startswith('STOCHRSIk')), None)
     stoch_k_deger = son_s.get(stoch_k_col) if stoch_k_col else None
     if stoch_k_deger is not None and pd.notna(stoch_k_deger):
-        kisa_puanlar.append(1 if stoch_k_deger > 50 else -1)
+        _bilesen_ekle(kisa_puanlar, kisa_bilesenler, 1 if stoch_k_deger > 50 else -1,
+                      'StochRSI %K', f"{stoch_k_deger:.1f}", 'son kapanış')
     macd_hist = son_s.get('MACDh_12_26_9')
     if macd_hist is not None and pd.notna(macd_hist):
-        kisa_puanlar.append(1 if macd_hist > 0 else -1)
+        _bilesen_ekle(kisa_puanlar, kisa_bilesenler, 1 if macd_hist > 0 else -1,
+                      'MACD Histogram', f"{macd_hist:+.3f}", 'son kapanış')
     kisa_vade = _vade_ozet(kisa_puanlar, 10)
+    kisa_vade['bilesenler'] = kisa_bilesenler
 
     # ORTA VADE (50 gün): EMA50-vs-fiyat, 50 günlük momentum, ADX DI+/DI- yönü
-    orta_puanlar = []
+    orta_puanlar, orta_bilesenler = [], []
     ema50 = son_s.get('EMA_50')
     if ema50 is not None and pd.notna(ema50):
-        orta_puanlar.append(1 if son_s['Close'] > ema50 else -1)
+        _bilesen_ekle(orta_puanlar, orta_bilesenler, 1 if guncel_fiyat > ema50 else -1,
+                      'Fiyat / EMA50', f"{guncel_fiyat:.2f} / {ema50:.2f} TL", 'anlık fiyat / son kapanış EMA')
     momentum_50g = None
     if len(df) > 50:
-        momentum_50g = ((son_s['Close'] / df['Close'].iloc[-51]) - 1) * 100
-        orta_puanlar.append(1 if momentum_50g > 0 else -1)
+        momentum_50g = ((guncel_fiyat / df['Close'].iloc[-51]) - 1) * 100
+        _bilesen_ekle(orta_puanlar, orta_bilesenler, 1 if momentum_50g > 0 else -1,
+                      '50 Günlük Momentum', f"{momentum_50g:+.2f}%", 'anlık fiyat')
     di_plus, di_minus = son_s.get('DMP_14'), son_s.get('DMN_14')
     if di_plus is not None and di_minus is not None and pd.notna(di_plus) and pd.notna(di_minus):
-        orta_puanlar.append(1 if di_plus > di_minus else -1)
+        _bilesen_ekle(orta_puanlar, orta_bilesenler, 1 if di_plus > di_minus else -1,
+                      'ADX Yönü (+DI/-DI)', f"{di_plus:.1f} / {di_minus:.1f}", 'son kapanış')
     orta_vade = _vade_ozet(orta_puanlar, 50)
     orta_vade['momentum'] = momentum_50g
+    orta_vade['bilesenler'] = orta_bilesenler
 
     # UZUN VADE (200 gün): EMA200-vs-fiyat, SuperTrend yönü, 200 günlük momentum
-    uzun_puanlar = []
+    uzun_puanlar, uzun_bilesenler = [], []
     ema200 = son_s.get('EMA_200')
     if ema200 is not None and pd.notna(ema200):
-        uzun_puanlar.append(1 if son_s['Close'] > ema200 else -1)
+        _bilesen_ekle(uzun_puanlar, uzun_bilesenler, 1 if guncel_fiyat > ema200 else -1,
+                      'Fiyat / EMA200', f"{guncel_fiyat:.2f} / {ema200:.2f} TL", 'anlık fiyat / son kapanış EMA')
     st_col = next((c for c in df.columns if c.startswith('SUPERTd')), None)
     st_deger = son_s.get(st_col) if st_col else None
     if st_deger is not None and pd.notna(st_deger):
-        uzun_puanlar.append(1 if st_deger == 1 else -1)
+        _bilesen_ekle(uzun_puanlar, uzun_bilesenler, 1 if st_deger == 1 else -1,
+                      'SuperTrend Yönü', 'AL' if st_deger == 1 else 'SAT', 'son kapanış')
     momentum_200g = None
     if len(df) > 200:
-        momentum_200g = ((son_s['Close'] / df['Close'].iloc[-201]) - 1) * 100
-        uzun_puanlar.append(1 if momentum_200g > 0 else -1)
+        momentum_200g = ((guncel_fiyat / df['Close'].iloc[-201]) - 1) * 100
+        _bilesen_ekle(uzun_puanlar, uzun_bilesenler, 1 if momentum_200g > 0 else -1,
+                      '200 Günlük Momentum', f"{momentum_200g:+.2f}%", 'anlık fiyat')
     uzun_vade = _vade_ozet(uzun_puanlar, 200)
     uzun_vade['momentum'] = momentum_200g
+    uzun_vade['bilesenler'] = uzun_bilesenler
 
     return {'kisa_vade': kisa_vade, 'orta_vade': orta_vade, 'uzun_vade': uzun_vade}
 
@@ -904,17 +926,22 @@ def build_veri_baglami(hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_dur
         f"SuperTrend: {st_durum}",
     ]
     if zaman_dilimi:
-        kisa, orta, uzun = zaman_dilimi['kisa_vade'], zaman_dilimi['orta_vade'], zaman_dilimi['uzun_vade']
+        for etiket, gun, veri in [
+            ("Kısa Vade Trend", 10, zaman_dilimi['kisa_vade']),
+            ("Orta Vade Trend", 50, zaman_dilimi['orta_vade']),
+            ("Uzun Vade Trend", 200, zaman_dilimi['uzun_vade']),
+        ]:
+            bilesen_metni = "; ".join(
+                f"{b['ad']}: {b['deger']} ({b['yon']}, {b['veri_tabani']})" for b in veri.get('bilesenler', [])
+            ) or "Veri Yok"
+            satirlar.append(
+                f"{etiket} ({gun} gün): {veri['yon'] or 'Belirlenemedi'} "
+                f"({veri['al_sayisi']}/{veri['toplam']} ölçüt uyumlu) — {bilesen_metni}"
+            )
         satirlar.append(
-            f"Kısa Vade Trend (10 gün): {kisa['yon'] or 'Belirlenemedi'} ({kisa['al_sayisi']}/{kisa['toplam']} ölçüt)"
-        )
-        satirlar.append(
-            f"Orta Vade Trend (50 gün): {orta['yon'] or 'Belirlenemedi'} ({orta['al_sayisi']}/{orta['toplam']} ölçüt), "
-            f"50 günlük momentum: {fmt(orta['momentum'], '%')}"
-        )
-        satirlar.append(
-            f"Uzun Vade Trend (200 gün): {uzun['yon'] or 'Belirlenemedi'} ({uzun['al_sayisi']}/{uzun['toplam']} ölçüt), "
-            f"200 günlük momentum: {fmt(uzun['momentum'], '%')}"
+            "NOT (Vade Analizi Veri Zamanlaması): Momentum ve EMA karşılaştırmaları anlık fiyata göre, "
+            "StochRSI/MACD/ADX/SuperTrend değerleri ise son tamamlanmış kapanışa göre hesaplanmıştır — "
+            "bu iki tür veri farklı zaman noktalarına ait, karıştırma."
         )
     else:
         satirlar.append("Kısa/Orta/Uzun Vade Trend: Belirlenemedi")
@@ -1499,13 +1526,22 @@ with tab3:
                 ]
                 for col, (etiket, veri) in zip(vade_cols, vade_bilgi):
                     with col:
+                        bilesen_satirlari = ""
+                        for b in veri.get('bilesenler', []):
+                            nokta_rengi = "#22c55e" if b['yon'] == "Yükseliş" else "#ef4444"
+                            bilesen_satirlari += (
+                                f"<div style='text-align:left; font-size:0.78em; margin-top:4px;'>"
+                                f"<span style='color:{nokta_rengi};'>●</span> "
+                                f"{b['ad']}: <b>{b['deger']}</b> <span style='opacity:0.6;'>({b['veri_tabani']})</span></div>"
+                            )
                         if veri['yon']:
                             renk = "#22c55e" if veri['yon'] == "Yükseliş" else ("#ef4444" if veri['yon'] == "Düşüş" else "#eab308")
                             st.markdown(
-                                f"<div class='risk-alarm' style='border-color:{renk}; background: rgba(0,0,0,0.15); text-align:center;'>"
-                                f"<b>{etiket} ({veri['gun']} gün)</b><br>"
+                                f"<div class='risk-alarm' style='border-color:{renk}; background: rgba(0,0,0,0.15);'>"
+                                f"<div style='text-align:center;'><b>{etiket} ({veri['gun']} gün)</b><br>"
                                 f"<span style='color:{renk}; font-size:1.15em;'>{veri['yon']}</span><br>"
-                                f"<span style='font-size:0.8em;'>{veri['al_sayisi']}/{veri['toplam']} ölçüt uyumlu</span></div>",
+                                f"<span style='font-size:0.8em;'>{veri['al_sayisi']}/{veri['toplam']} ölçüt uyumlu</span></div>"
+                                f"{bilesen_satirlari}</div>",
                                 unsafe_allow_html=True
                             )
                         else:
@@ -1514,9 +1550,11 @@ with tab3:
                                 unsafe_allow_html=True
                             )
                 st.caption(
-                    "ℹ️ Kısa/Orta/Uzun Vade Trend Analizi, ADX, hacim teyidi, destek/direnç ve Fibonacci seviyeleri "
-                    "destekleyici bağlamdır — geçmiş veriyle test edilmemiştir. Sadece aşağıdaki 'Sinyal Performans "
-                    "Karşılaştırması' tablosundaki SuperTrend/Optimize/Squeeze sinyalleri geçmiş veriyle test edilmiştir."
+                    "ℹ️ Vade analizindeki momentum/EMA karşılaştırmaları anlık fiyata göre, StochRSI/MACD/ADX/SuperTrend "
+                    "ise son tamamlanmış kapanışa göre hesaplanır — parantez içi etiketler hangisinin hangi olduğunu gösterir. "
+                    "Bu analiz, ADX, hacim teyidi, destek/direnç ve Fibonacci seviyeleri gibi destekleyici bağlamdır — "
+                    "geçmiş veriyle test edilmemiştir. Sadece aşağıdaki 'Sinyal Performans Karşılaştırması' tablosundaki "
+                    "SuperTrend/Optimize/Squeeze sinyalleri geçmiş veriyle test edilmiştir."
                 )
 
         with st.expander("🏛️ Bağımsız Araştırma Raporu (Claude)", expanded=False):
