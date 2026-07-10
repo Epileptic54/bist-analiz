@@ -1438,6 +1438,8 @@ with tab3:
         veri_baglami_claude = None
         karar = skor = ema_durum = rsi_durum = st_durum = finansal_durum = None
         rsi_deger = None
+        guncel_fiyat_ozet = None
+        canli_saat_secilen = None
 
         st.markdown("<div class='fintables-header'>🧠 GEMİNİ DERİN ANALİZ RAPORU</div>", unsafe_allow_html=True)
 
@@ -1447,6 +1449,7 @@ with tab3:
             if canli_fiyat_secilen is not None:
                 son_s['Close'] = canli_fiyat_secilen
                 st.caption(f"Güncel Fiyat: {son_s['Close']:.2f} TL · {canli_saat_secilen}")
+            guncel_fiyat_ozet = son_s['Close']
 
             bogalar = 0
             toplam_kriter = 5
@@ -1658,7 +1661,13 @@ with tab3:
 
         st.markdown("<div class='fintables-header'>📊 TEMEL ANALİZ ÖZETİ</div>", unsafe_allow_html=True)
 
-        temel_veriler = [
+        temel_veriler = []
+        if guncel_fiyat_ozet is not None:
+            fiyat_deger = f"{guncel_fiyat_ozet:.2f} TL"
+            if canli_saat_secilen:
+                fiyat_deger += f" ({canli_saat_secilen})"
+            temel_veriler.append(("Güncel Fiyat", fiyat_deger))
+        temel_veriler += [
             ("F/K Oranı", fmt(fk)),
             ("Fiyat / Defter Değeri (PD/DD)", fmt(pddd)),
         ]
