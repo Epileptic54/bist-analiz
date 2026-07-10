@@ -928,6 +928,91 @@ def sinyal_performansi(df, al_kosulu, sat_kosulu, son_kac_sinyal=10):
     }
 
 
+def _gecmis_sinyalleri_hesapla(df_secilen, baslangic_index=210):
+    n = len(df_secilen)
+    vade_al = pd.Series(False, index=df_secilen.index)
+    vade_sat = pd.Series(False, index=df_secilen.index)
+    dd_al = pd.Series(False, index=df_secilen.index)
+    dd_sat = pd.Series(False, index=df_secilen.index)
+    vade_gecmisi = {}
+    dd_gecmisi = {}
+
+    onceki_kisa_yon = None
+    for i in range(min(baslangic_index, n), n):
+        df_dilim = df_secilen.iloc[:i + 1]
+        son_s_i = df_secilen.iloc[i]
+        guncel_fiyat_i = son_s_i['Close']
+
+        momentum_10g_i = None
+        if len(df_dilim) > 10:
+            momentum_10g_i = ((guncel_fiyat_i / df_dilim['Close'].iloc[-11]) - 1) * 100
+        zd = _zaman_dilimi_analizi(df_dilim, son_s_i, momentum_10g_i)
+        vade_gecmisi[df_secilen.index[i]] = zd
+
+        kisa_yon = zd['kisa_vade']['yon']
+        uzun_yon = zd['uzun_vade']['yon']
+        if onceki_kisa_yon is not None:
+            if kisa_yon == "Yükseliş" and onceki_kisa_yon != "Yükseliş" and uzun_yon == "Yükseliş":
+                vade_al.iloc[i] = True
+            elif kisa_yon == "Düşüş" and onceki_kisa_yon != "Düşüş":
+                vade_sat.iloc[i] = True
+        onceki_kisa_yon = kisa_yon
+
+        _, direnc_lvl, destek_lvl, _ = _destek_direnc_seviyeleri(df_dilim, 120, guncel_fiyat_i)
+        dd_gecmisi[df_secilen.index[i]] = (direnc_lvl, destek_lvl)
+        if destek_lvl and abs(guncel_fiyat_i - destek_lvl[0]) / destek_lvl[0] <= 0.02:
+            dd_al.iloc[i] = True
+        if direnc_lvl and abs(guncel_fiyat_i - direnc_lvl[0]) / direnc_lvl[0] <= 0.02:
+            dd_sat.iloc[i] = True
+
+    return {
+        'vade_al': vade_al, 'vade_sat': vade_sat, 'dd_al': dd_al, 'dd_sat': dd_sat,
+        'vade_gecmisi': vade_gecmisi, 'dd_gecmisi': dd_gecmisi,
+    }
+
+
+def _vade_gerekce_metni(zd):
+    kisa, uzun = zd['kisa_vade']['yon'], zd['uzun_vade']['yon']
+    return f"Kısa vade {kisa}'e döndü, uzun vade {uzun} yönündeydi"
+
+
+def _dd_gerekce_metni(direnc_lvl, destek_lvl, al_mi):
+    if al_mi:
+        return f"Fiyat, {destek_lvl[0]:.2f} TL destek seviyesine yakınlaştı"
+    return f"Fiyat, {direnc_lvl[0]:.2f} TL direnç seviyesine yakınlaştı"
+
+
+def _islem_listesi_olustur(df, al_kosulu, sat_kosulu, gerekce_al_fn, gerekce_sat_fn=None):
+    al_indices = df.index[al_kosulu].tolist()
+    sat_indices = df.index[sat_kosulu].tolist()
+    islemler = []
+    for giris_idx in al_indices:
+        sonraki_satlar = [s for s in sat_indices if s > giris_idx]
+        cikis_idx = sonraki_satlar[0] if sonraki_satlar else df.index[-1]
+        giris_fiyat = df.loc[giris_idx, 'Close']
+        cikis_fiyat = df.loc[cikis_idx, 'Close']
+        islemler.append({
+            'giris_tarih': df.loc[giris_idx, 'Date'], 'giris_fiyat': giris_fiyat,
+            'cikis_tarih': df.loc[cikis_idx, 'Date'], 'cikis_fiyat': cikis_fiyat,
+            'getiri_yuzde': (cikis_fiyat / giris_fiyat - 1) * 100,
+            'acik': not sonraki_satlar,
+            'gerekce': gerekce_al_fn(giris_idx),
+        })
+    return islemler
+
+
+def _istatistik_ozeti(islemler):
+    if not islemler:
+        return None
+    getiriler = [t['getiri_yuzde'] for t in islemler]
+    kazanan = sum(1 for g in getiriler if g > 0)
+    return {
+        'toplam_islem': len(islemler),
+        'kazanma_orani': (kazanan / len(islemler)) * 100,
+        'ortalama_getiri': sum(getiriler) / len(getiriler),
+    }
+
+
 def _hedef_ve_stop_hesapla(df, son_s):
     guncel_fiyat = son_s['Close']
     _, direnc_seviyeleri, destek_seviyeleri, _ = _destek_direnc_seviyeleri(
@@ -1477,6 +1562,101 @@ with tab3:
                 st.markdown("<div class='fintables-header'>📈 Sinyal Performans Karşılaştırması (Geçmiş)</div>", unsafe_allow_html=True)
                 st.markdown(html_tablo(karsilastirma_satirlari), unsafe_allow_html=True)
                 st.caption("⚠️ Geçmiş sinyal performansı gelecekteki sonuçların garantisi değildir.")
+
+            backtest_key = f"backtest_sonuc_{secilen_ticker}"
+            if st.button("🧪 Vade & Destek/Direnç Stratejilerini Backtest Et", key=f"backtest_btn_{secilen_ticker}"):
+                with st.spinner("Geçmiş veriler taranıyor (lookahead-bias'sız, gün gün yeniden hesaplanıyor)..."):
+                    st.session_state[backtest_key] = _gecmis_sinyalleri_hesapla(df_secilen)
+
+            if st.session_state.get(backtest_key):
+                bt = st.session_state[backtest_key]
+                with st.expander("🧪 Backtest Sonuçları (Vade & Destek/Direnç)", expanded=True):
+                    islemler_vade = _islem_listesi_olustur(
+                        df_secilen, bt['vade_al'], bt['vade_sat'],
+                        lambda idx: _vade_gerekce_metni(bt['vade_gecmisi'][idx])
+                    )
+                    islemler_dd = _islem_listesi_olustur(
+                        df_secilen, bt['dd_al'], bt['dd_sat'],
+                        lambda idx: _dd_gerekce_metni(*bt['dd_gecmisi'][idx], True)
+                    )
+                    ozet_vade = _istatistik_ozeti(islemler_vade)
+                    ozet_dd = _istatistik_ozeti(islemler_dd)
+
+                    oran_cols = st.columns(6)
+                    with oran_cols[0]:
+                        st.metric("Vade İşlem", ozet_vade['toplam_islem'] if ozet_vade else 0)
+                    with oran_cols[1]:
+                        st.metric("Vade Kazanma %", f"{ozet_vade['kazanma_orani']:.0f}%" if ozet_vade else "—")
+                    with oran_cols[2]:
+                        st.metric("Vade Ort. Getiri", f"{ozet_vade['ortalama_getiri']:+.2f}%" if ozet_vade else "—")
+                    with oran_cols[3]:
+                        st.metric("D/D İşlem", ozet_dd['toplam_islem'] if ozet_dd else 0)
+                    with oran_cols[4]:
+                        st.metric("D/D Kazanma %", f"{ozet_dd['kazanma_orani']:.0f}%" if ozet_dd else "—")
+                    with oran_cols[5]:
+                        st.metric("D/D Ort. Getiri", f"{ozet_dd['ortalama_getiri']:+.2f}%" if ozet_dd else "—")
+
+                    bt_fig = go.Figure()
+                    bt_fig.add_trace(go.Candlestick(
+                        x=df_secilen['Date'], open=df_secilen['Open'], high=df_secilen['High'],
+                        low=df_secilen['Low'], close=df_secilen['Close'], name='OHLC', showlegend=False,
+                    ))
+                    vade_al_df = df_secilen[bt['vade_al']]
+                    vade_sat_df = df_secilen[bt['vade_sat']]
+                    dd_al_df = df_secilen[bt['dd_al']]
+                    dd_sat_df = df_secilen[bt['dd_sat']]
+                    if not vade_al_df.empty:
+                        bt_fig.add_trace(go.Scatter(x=vade_al_df['Date'], y=vade_al_df['Low'] * 0.97, mode='markers',
+                                                     marker=dict(symbol='triangle-up', size=11, color='#22c55e'), name='Vade AL'))
+                    if not vade_sat_df.empty:
+                        bt_fig.add_trace(go.Scatter(x=vade_sat_df['Date'], y=vade_sat_df['High'] * 1.03, mode='markers',
+                                                     marker=dict(symbol='triangle-down', size=11, color='#ef4444'), name='Vade SAT'))
+                    if not dd_al_df.empty:
+                        bt_fig.add_trace(go.Scatter(x=dd_al_df['Date'], y=dd_al_df['Low'] * 0.94, mode='markers',
+                                                     marker=dict(symbol='diamond', size=9, color='#0284c7'), name='D/D AL'))
+                    if not dd_sat_df.empty:
+                        bt_fig.add_trace(go.Scatter(x=dd_sat_df['Date'], y=dd_sat_df['High'] * 1.06, mode='markers',
+                                                     marker=dict(symbol='diamond', size=9, color='#fb923c'), name='D/D SAT'))
+                    bt_fig.update_layout(
+                        template="plotly_dark", paper_bgcolor=CHART_BG, plot_bgcolor=CHART_BG,
+                        font=dict(color=TEXT_COLOR), xaxis_rangeslider_visible=False, height=420,
+                        margin=dict(l=10, r=10, t=15, b=10), showlegend=True,
+                        legend=dict(orientation='h', bgcolor='rgba(0,0,0,0)', font=dict(size=9, color=TEXT_COLOR)),
+                    )
+                    bt_fig.update_xaxes(gridcolor=GRID_COLOR)
+                    bt_fig.update_yaxes(gridcolor=GRID_COLOR)
+                    st.plotly_chart(bt_fig, use_container_width=True)
+
+                    if islemler_vade:
+                        st.markdown("**Vade Stratejisi İşlemleri**")
+                        st.markdown(html_tablo([
+                            {
+                                'Giriş': f"{t['giris_tarih'].strftime('%d.%m.%Y')} ({t['giris_fiyat']:.2f} TL)",
+                                'Çıkış': "Açık" if t['acik'] else f"{t['cikis_tarih'].strftime('%d.%m.%Y')} ({t['cikis_fiyat']:.2f} TL)",
+                                'Getiri': f"{t['getiri_yuzde']:+.2f}%",
+                                'Gerekçe': t['gerekce'],
+                            } for t in islemler_vade
+                        ]), unsafe_allow_html=True)
+                    else:
+                        st.caption("Vade stratejisi bu dönemde hiç işlem üretmedi.")
+
+                    if islemler_dd:
+                        st.markdown("**Destek/Direnç Stratejisi İşlemleri**")
+                        st.markdown(html_tablo([
+                            {
+                                'Giriş': f"{t['giris_tarih'].strftime('%d.%m.%Y')} ({t['giris_fiyat']:.2f} TL)",
+                                'Çıkış': "Açık" if t['acik'] else f"{t['cikis_tarih'].strftime('%d.%m.%Y')} ({t['cikis_fiyat']:.2f} TL)",
+                                'Getiri': f"{t['getiri_yuzde']:+.2f}%",
+                                'Gerekçe': t['gerekce'],
+                            } for t in islemler_dd
+                        ]), unsafe_allow_html=True)
+                    else:
+                        st.caption("Destek/Direnç stratejisi bu dönemde hiç işlem üretmedi.")
+
+                    st.caption(
+                        "⚠️ Bu backtest, mevcut yfinance verisiyle (genelde ~1 yıl) sınırlıdır — az sayıda işlem "
+                        "istatistiksel olarak güvenilir olmayabilir. Geçmiş performans gelecekteki sonuçların garantisi değildir."
+                    )
 
     with col_right:
         fundamentals = fetch_fundamentals(yf_ticker)
