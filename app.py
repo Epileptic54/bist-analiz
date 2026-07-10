@@ -372,16 +372,19 @@ def _fibonacci_seviyeleri(df, gun_sayisi=120):
 
 def _vade_ozet(puanlar, gun):
     if not puanlar:
-        return {'gun': gun, 'yon': None, 'al_sayisi': 0, 'toplam': 0}
+        return {'gun': gun, 'yon': None, 'al_sayisi': 0, 'toplam': 0, 'uyumlu_sayisi': 0}
     al_sayisi = sum(1 for p in puanlar if p == 1)
     toplam = len(puanlar)
     if al_sayisi > toplam / 2:
         yon = "Yükseliş"
+        uyumlu_sayisi = al_sayisi
     elif al_sayisi < toplam / 2:
         yon = "Düşüş"
+        uyumlu_sayisi = toplam - al_sayisi
     else:
         yon = "Karışık"
-    return {'gun': gun, 'yon': yon, 'al_sayisi': al_sayisi, 'toplam': toplam}
+        uyumlu_sayisi = al_sayisi
+    return {'gun': gun, 'yon': yon, 'al_sayisi': al_sayisi, 'toplam': toplam, 'uyumlu_sayisi': uyumlu_sayisi}
 
 
 def _bilesen_ekle(puanlar, bilesenler, yon, ad, deger, veri_tabani):
@@ -399,7 +402,7 @@ def _zaman_dilimi_analizi(df, son_s, momentum_10g):
     kisa_puanlar, kisa_bilesenler = [], []
     if momentum_10g is not None:
         _bilesen_ekle(kisa_puanlar, kisa_bilesenler, 1 if momentum_10g > 0 else -1,
-                      '10 Günlük Momentum', f"{momentum_10g:+.2f}%", 'anlık fiyat')
+                      'Momentum (10g)', f"{momentum_10g:+.2f}%", 'anlık fiyat')
     stoch_k_col = next((c for c in df.columns if c.startswith('STOCHRSIk')), None)
     stoch_k_deger = son_s.get(stoch_k_col) if stoch_k_col else None
     if stoch_k_deger is not None and pd.notna(stoch_k_deger):
@@ -422,11 +425,11 @@ def _zaman_dilimi_analizi(df, son_s, momentum_10g):
     if len(df) > 50:
         momentum_50g = ((guncel_fiyat / df['Close'].iloc[-51]) - 1) * 100
         _bilesen_ekle(orta_puanlar, orta_bilesenler, 1 if momentum_50g > 0 else -1,
-                      '50 Günlük Momentum', f"{momentum_50g:+.2f}%", 'anlık fiyat')
+                      'Momentum (50g)', f"{momentum_50g:+.2f}%", 'anlık fiyat')
     di_plus, di_minus = son_s.get('DMP_14'), son_s.get('DMN_14')
     if di_plus is not None and di_minus is not None and pd.notna(di_plus) and pd.notna(di_minus):
         _bilesen_ekle(orta_puanlar, orta_bilesenler, 1 if di_plus > di_minus else -1,
-                      'ADX Yönü (+DI/-DI)', f"{di_plus:.1f} / {di_minus:.1f}", 'son kapanış')
+                      'ADX (±DI)', f"{di_plus:.1f} / {di_minus:.1f}", 'son kapanış')
     orta_vade = _vade_ozet(orta_puanlar, 50)
     orta_vade['momentum'] = momentum_50g
     orta_vade['bilesenler'] = orta_bilesenler
@@ -446,7 +449,7 @@ def _zaman_dilimi_analizi(df, son_s, momentum_10g):
     if len(df) > 200:
         momentum_200g = ((guncel_fiyat / df['Close'].iloc[-201]) - 1) * 100
         _bilesen_ekle(uzun_puanlar, uzun_bilesenler, 1 if momentum_200g > 0 else -1,
-                      '200 Günlük Momentum', f"{momentum_200g:+.2f}%", 'anlık fiyat')
+                      'Momentum (200g)', f"{momentum_200g:+.2f}%", 'anlık fiyat')
     uzun_vade = _vade_ozet(uzun_puanlar, 200)
     uzun_vade['momentum'] = momentum_200g
     uzun_vade['bilesenler'] = uzun_bilesenler
@@ -1114,7 +1117,7 @@ def build_veri_baglami(hisse_adi, son_s, ema_durum, rsi_deger, rsi_durum, st_dur
             ) or "Veri Yok"
             satirlar.append(
                 f"{etiket} ({gun} gün): {veri['yon'] or 'Belirlenemedi'} "
-                f"({veri['al_sayisi']}/{veri['toplam']} ölçüt uyumlu) — {bilesen_metni}"
+                f"({veri['uyumlu_sayisi']}/{veri['toplam']} ölçüt uyumlu) — {bilesen_metni}"
             )
         satirlar.append(
             "NOT (Vade Analizi Veri Zamanlaması): Momentum ve EMA karşılaştırmaları anlık fiyata göre, "
@@ -1818,15 +1821,17 @@ with tab3:
                             renk = vade_renk[veri['yon']]
                             st.markdown(
                                 f"<div class='risk-alarm {sinif}' style='text-align:center;'>"
-                                f"<b>{etiket} ({veri['gun']} gün)</b><br>"
+                                f"<b>{etiket}</b><br>"
+                                f"<span style='font-size:0.72em; opacity:0.65;'>{veri['gun']} gün</span><br>"
                                 f"<span style='color:{renk}; font-size:1.15em;'>{veri['yon']}</span><br>"
-                                f"<span style='font-size:0.8em;'>{veri['al_sayisi']}/{veri['toplam']} ölçüt uyumlu</span>"
+                                f"<span style='font-size:0.8em;'>{veri['uyumlu_sayisi']}/{veri['toplam']} ölçüt uyumlu</span>"
                                 f"{bilesen_satirlari}</div>",
                                 unsafe_allow_html=True
                             )
                         else:
                             st.markdown(
-                                f"<div class='risk-alarm alarm-notr' style='text-align:center;'><b>{etiket} ({veri['gun']} gün)</b><br>Belirlenemedi</div>",
+                                f"<div class='risk-alarm alarm-notr' style='text-align:center;'><b>{etiket}</b><br>"
+                                f"<span style='font-size:0.72em; opacity:0.65;'>{veri['gun']} gün</span><br>Belirlenemedi</div>",
                                 unsafe_allow_html=True
                             )
                 st.caption(
