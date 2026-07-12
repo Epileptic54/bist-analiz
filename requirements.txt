@@ -1,4 +1,5 @@
 streamlit==1.59.1
 pandas==3.0.3
+plotly==6.8.0
 yfinance==1.5.1
 python-dotenv==1.2.2
