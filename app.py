@@ -221,13 +221,26 @@ def _haberleri_tekillestir(haberler, benzerlik_esigi=0.8):
     return tekil
 
 
+# Bazi kaynaklar her gun ayni sablonla ("X Y Tarih Gunluk Teknik Analiz" gibi)
+# otomatik icerik uretiyor - bunlar gercek haber degil, listeyi doldurup
+# gercek gelismeleri gorunmez kiliyor. Baslikta bu desenlerden biri gecerse elenir.
+_HABER_SPAM_DESENLERI = ("günlük teknik analiz", "haftalık teknik analiz", "aylık teknik analiz")
+
+
+def _haber_spam_mi(baslik):
+    b = baslik.lower()
+    return any(desen in b for desen in _HABER_SPAM_DESENLERI)
+
+
 @st.cache_data(ttl=1800)
 def haber_cek(sorgu, adet=8):
     """Google News RSS uzerinden (API anahtari gerekmez, yapay zeka kullanmaz)
     Turkce, guncel haber basliklari ceker. 30 dakika cache'lenir - 'canli' ama
     her sayfa yenilemesinde Google'a istek atmayi onler. Ayni olayi farkli
     kaynaklardan tekrar tekrar gosteren Google News davranisina karsi,
-    ham sonuclarin bir kismi tekillestirildikten sonra istenen adete kesilir."""
+    ham sonuclarin bir kismi tekillestirildikten sonra istenen adete kesilir.
+    Otomatik-uretilmis gunluk 'teknik analiz' sablonlari da (gercek haber
+    degil, gurultu) filtrelenir."""
     try:
         q = urllib.parse.quote(sorgu)
         url = f"https://news.google.com/rss/search?q={q}&hl=tr&gl=TR&ceid=TR:tr"
@@ -236,11 +249,14 @@ def haber_cek(sorgu, adet=8):
             data = resp.read()
         root = ET.fromstring(data)
         ham_haberler = []
-        for item in root.findall('.//item')[:adet * 3]:
+        for item in root.findall('.//item')[:max(adet * 4, 40)]:
             baslik_el = item.find('title')
             link_el = item.find('link')
             pub_el = item.find('pubDate')
             kaynak_el = item.find('source')
+            baslik = baslik_el.text if baslik_el is not None else ""
+            if not baslik or _haber_spam_mi(baslik):
+                continue
             tarih = None
             if pub_el is not None and pub_el.text:
                 try:
@@ -248,7 +264,7 @@ def haber_cek(sorgu, adet=8):
                 except Exception:
                     tarih = None
             ham_haberler.append({
-                'baslik': baslik_el.text if baslik_el is not None else "",
+                'baslik': baslik,
                 'link': link_el.text if link_el is not None else "",
                 'kaynak': kaynak_el.text if kaynak_el is not None else "",
                 'tarih': tarih,
@@ -1108,7 +1124,7 @@ with tab_teknik:
 
 with tab_haber:
     st.markdown("<div class='fintables-header'>📰 BIST ve Mali Piyasalar</div>", unsafe_allow_html=True)
-    genel_haberler = haber_cek("Borsa İstanbul BIST100 mali piyasalar", adet=8)
+    genel_haberler = haber_cek("Borsa İstanbul BIST100 mali piyasalar when:14d", adet=8)
     _haber_listesi_goster(genel_haberler)
 
     st.markdown("---")
@@ -1122,7 +1138,7 @@ with tab_haber:
                 unsafe_allow_html=True
             )
             st.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
-            sirket_haberleri = haber_cek(f"{ad} hisse", adet=6)
+            sirket_haberleri = haber_cek(f"{ad} hisse when:14d", adet=10)
             _haber_listesi_goster(sirket_haberleri)
 
     st.caption(
