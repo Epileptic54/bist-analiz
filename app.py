@@ -99,6 +99,13 @@ def _tabloyu_olustur(ticker):
     return True
 
 
+GEREKLI_INDIKATOR_KOLONLARI = [
+    'RSI_14', 'MACD_12_26_9', 'MACDs_12_26_9', 'MACDh_12_26_9',
+    'EMA_50', 'EMA_200', 'SUPERT_10_3', 'SUPERTd_10_3',
+    'DONCHIAN_UST_20', 'DONCHIAN_ALT_20', 'DMP_14', 'DMN_14', 'ADX_14', 'ATR_14',
+]
+
+
 @st.cache_data(ttl=600)
 def load_data(ticker):
     df = None
@@ -107,6 +114,14 @@ def load_data(ticker):
         conn = sqlite3.connect('bist_portfolio.db')
         try:
             df = pd.read_sql_query(f"SELECT * FROM {ticker}", conn)
+            # Eski semadan kalma tablo (indikator kolonlari eksik) - self-heal
+            # sadece "tablo yok" hatasinda degil, eksik kolon durumunda da devreye girsin.
+            if not tablo_olusturuldu and any(k not in df.columns for k in GEREKLI_INDIKATOR_KOLONLARI):
+                conn.close()
+                if not _tabloyu_olustur(ticker):
+                    return None
+                tablo_olusturuldu = True
+                continue
             break
         except Exception as e:
             if tablo_olusturuldu:
