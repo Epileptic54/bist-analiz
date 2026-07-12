@@ -1,7 +1,12 @@
+import difflib
 import os
 import sqlite3
 import time
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -163,6 +168,124 @@ def get_canli_fiyat(ticker_db):
         return round(float(son_fiyat), 2), round(float(onceki_kapanis), 2), saat
     except Exception:
         return None, None, None
+
+
+@st.cache_data(ttl=3600)
+def fetch_fundamentals(yf_ticker):
+    try:
+        info = yf.Ticker(yf_ticker).info
+    except Exception:
+        return {}
+
+    fk = info.get('trailingPE')
+    pddd = info.get('priceToBook')
+    cari_oran = info.get('currentRatio')
+    total_debt = info.get('totalDebt')
+    total_cash = info.get('totalCash')
+    ebitda = info.get('ebitda')
+    roe = info.get('returnOnEquity')
+
+    net_borc_favok = None
+    if total_debt is not None and total_cash is not None and ebitda:
+        net_borc_favok = (total_debt - total_cash) / ebitda
+
+    return {
+        'fk': fk,
+        'pddd': pddd,
+        'cari_oran': cari_oran,
+        'net_borc_favok': net_borc_favok,
+        'roe': roe,
+    }
+
+
+def fmt(value, suffix='', decimals=2):
+    if value is None:
+        return 'Veri Yok'
+    return f"{value:.{decimals}f}{suffix}"
+
+
+def _haber_basligi_normallestir(baslik):
+    # Kaynak adi genelde " - Kaynak" seklinde sonda ekleniyor, karsilastirmadan once at
+    return baslik.rsplit(" - ", 1)[0].strip().lower()
+
+
+def _haberleri_tekillestir(haberler, benzerlik_esigi=0.8):
+    tekil = []
+    normlar = []
+    for h in haberler:
+        norm = _haber_basligi_normallestir(h['baslik'])
+        if any(difflib.SequenceMatcher(None, norm, n).ratio() >= benzerlik_esigi for n in normlar):
+            continue
+        tekil.append(h)
+        normlar.append(norm)
+    return tekil
+
+
+@st.cache_data(ttl=1800)
+def haber_cek(sorgu, adet=8):
+    """Google News RSS uzerinden (API anahtari gerekmez, yapay zeka kullanmaz)
+    Turkce, guncel haber basliklari ceker. 30 dakika cache'lenir - 'canli' ama
+    her sayfa yenilemesinde Google'a istek atmayi onler. Ayni olayi farkli
+    kaynaklardan tekrar tekrar gosteren Google News davranisina karsi,
+    ham sonuclarin bir kismi tekillestirildikten sonra istenen adete kesilir."""
+    try:
+        q = urllib.parse.quote(sorgu)
+        url = f"https://news.google.com/rss/search?q={q}&hl=tr&gl=TR&ceid=TR:tr"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = resp.read()
+        root = ET.fromstring(data)
+        ham_haberler = []
+        for item in root.findall('.//item')[:adet * 3]:
+            baslik_el = item.find('title')
+            link_el = item.find('link')
+            pub_el = item.find('pubDate')
+            kaynak_el = item.find('source')
+            tarih = None
+            if pub_el is not None and pub_el.text:
+                try:
+                    tarih = parsedate_to_datetime(pub_el.text)
+                except Exception:
+                    tarih = None
+            ham_haberler.append({
+                'baslik': baslik_el.text if baslik_el is not None else "",
+                'link': link_el.text if link_el is not None else "",
+                'kaynak': kaynak_el.text if kaynak_el is not None else "",
+                'tarih': tarih,
+            })
+        return _haberleri_tekillestir(ham_haberler)[:adet]
+    except Exception:
+        return []
+
+
+def _goreceli_zaman(tarih):
+    if tarih is None:
+        return ""
+    simdi = datetime.now(tarih.tzinfo)
+    fark = simdi - tarih
+    if fark.days > 0:
+        return f"{fark.days} gün önce"
+    saat = fark.seconds // 3600
+    if saat > 0:
+        return f"{saat} saat önce"
+    dakika = fark.seconds // 60
+    return f"{dakika} dakika önce" if dakika > 0 else "az önce"
+
+
+def _haber_listesi_goster(haberler):
+    if not haberler:
+        st.caption("Bu konuda haber bulunamadı.")
+        return
+    for h in haberler:
+        goreceli = _goreceli_zaman(h['tarih'])
+        alt_bilgi = " · ".join(x for x in [h['kaynak'], goreceli] if x)
+        st.markdown(
+            f"<div style='padding:9px 0; border-bottom:1px solid {GRID_COLOR};'>"
+            f"<a href='{h['link']}' target='_blank' style='color:{TEXT_COLOR}; font-weight:600; "
+            f"text-decoration:none; font-size:0.92em;'>{h['baslik']}</a><br>"
+            f"<span style='font-size:0.76em; opacity:0.6;'>{alt_bilgi}</span></div>",
+            unsafe_allow_html=True
+        )
 
 
 # TradingView Tarzı Tam Karanlık (Dark Mode) Kurumsal Arayüz Teması
@@ -594,10 +717,21 @@ if portfoy:
 
 yogunlasma_uyarilari = _portfoy_risk_uyarilari(pf_ham_veri, toplam_deger)
 
+PORTFOY_RISK_ESIGI = -15.0  # toplam kar/zarar % bu esigin altina inerse uyar
+toplam_kz_yuzde_genel = ((toplam_deger - toplam_maliyet) / toplam_maliyet * 100) if toplam_maliyet else 0
+portfoy_risk_uyarisi = None
+if toplam_maliyet > 0 and toplam_kz_yuzde_genel <= PORTFOY_RISK_ESIGI:
+    portfoy_risk_uyarisi = (
+        f"🔴 Portföy Risk Uyarısı — toplam kâr/zarar %{toplam_kz_yuzde_genel:+.1f} "
+        f"(eşik: %{PORTFOY_RISK_ESIGI:.0f}). Yeni pozisyon açmadan önce gözden geçir."
+    )
+
 # ============ GÜNLÜK ÖZET ============
 with st.container(border=True):
     st.markdown("#### 🗞️ Günlük Özet")
-    if not yogunlasma_uyarilari:
+    if portfoy_risk_uyarisi:
+        st.markdown(f"<div class='risk-alarm'>{portfoy_risk_uyarisi}</div>", unsafe_allow_html=True)
+    if not yogunlasma_uyarilari and not portfoy_risk_uyarisi:
         st.caption("Bugün için özel bir uyarı yok — portföyünde yoğunlaşma riski görünmüyor.")
     else:
         for uyari in yogunlasma_uyarilari:
@@ -608,7 +742,7 @@ with st.container(border=True):
 
 st.markdown("---")
 
-tab_portfoy, tab_teknik = st.tabs(["💼 Portföy", "📈 Teknik Analiz"])
+tab_portfoy, tab_teknik, tab_haber = st.tabs(["💼 Portföy", "📈 Teknik Analiz", "📰 Haberler"])
 
 with tab_portfoy:
     st.markdown("<div class='fintables-header'>💼 PORTFÖYÜM</div>", unsafe_allow_html=True)
@@ -664,9 +798,12 @@ with tab_portfoy:
         with ozet_cols[2]:
             st.metric("Toplam Kâr/Zarar", f"{toplam_kz:,.2f} TL".replace(',', '.'), delta=f"{toplam_kz_yuzde:+.1f}%")
 
+        if portfoy_risk_uyarisi:
+            st.markdown(f"<div class='risk-alarm'>{portfoy_risk_uyarisi}</div>", unsafe_allow_html=True)
         for uyari in yogunlasma_uyarilari:
             st.markdown(f"<div class='risk-alarm'>{uyari}</div>", unsafe_allow_html=True)
-        st.caption(f"ℹ️ Disiplin kuralı: tek pozisyon portföyün %35'ini (≈ {toplam_deger * 0.35:,.2f} TL) geçmemesi önerilir.".replace(',', '.'))
+        st.caption(f"ℹ️ Disiplin kuralı: tek pozisyon portföyün %35'ini (≈ {toplam_deger * 0.35:,.2f} TL) geçmemesi önerilir. "
+                   f"Toplam kâr/zarar %{PORTFOY_RISK_ESIGI:.0f}'in altına inerse risk uyarısı tetiklenir.".replace(',', '.'))
 
 with tab_teknik:
     secilen_hisse_adi = st.selectbox("📊 Detaylı Analiz İçin Hisse Seç:", list(hisseler.values()), key="teknik_hisse_secim")
@@ -697,18 +834,43 @@ with tab_teknik:
         uzun_durum = uzun_yon_s.iloc[-1]
         tavsiye_durum = "AL" if bool(tavsiye_al_s.iloc[-1]) else ("SAT" if bool(tavsiye_sat_s.iloc[-1]) else "BEKLE")
 
+        # ============ TEMEL ANALİZ + LİKİDİTE ============
+        yf_ticker_secilen = secilen_ticker.replace('_', '.')
+        fundamentals = fetch_fundamentals(yf_ticker_secilen)
+        fk = fundamentals.get('fk')
+        pddd = fundamentals.get('pddd')
+        cari_oran = fundamentals.get('cari_oran')
+        net_borc_favok = fundamentals.get('net_borc_favok')
+        roe = fundamentals.get('roe')
+        is_banka = cari_oran is None or net_borc_favok is None
+        finansal_risk = (cari_oran is not None and cari_oran < 1) or (net_borc_favok is not None and net_borc_favok > 4)
+        temel_durum = "Riskli" if finansal_risk else "Sağlıklı"
+
+        ortalama_hacim_30g = df_secilen['Volume'].tail(30).mean()
+        dusuk_likidite = ortalama_hacim_30g < 500_000
+        if dusuk_likidite:
+            st.markdown(
+                f"<div class='risk-alarm alarm-uyari'>⚠️ <b>Düşük Likidite</b> — son 30 günlük ortalama hacim "
+                f"{ortalama_hacim_30g:,.0f} LOT (500.000'in altında). Emirler geniş fiyat makasıyla ve fiyatı "
+                f"hareket ettirerek gerçekleşebilir.</div>".replace(',', '.'),
+                unsafe_allow_html=True
+            )
+
         # ============ VADE TABLOSU (öneri kartı) ============
         st.markdown("<div class='fintables-header'>🧭 Vade Tablosu — Güncel Durum</div>", unsafe_allow_html=True)
         vade_renk_harita = {"AL": RENK_IYI, "Yükseliş": RENK_IYI, "SAT": RENK_KRITIK, "Düşüş": RENK_KRITIK,
-                             "NÖTR": RENK_UYARI, "Karışık": RENK_UYARI, "BEKLE": RENK_UYARI}
+                             "NÖTR": RENK_UYARI, "Karışık": RENK_UYARI, "BEKLE": RENK_UYARI,
+                             "Sağlıklı": RENK_IYI, "Riskli": RENK_KRITIK}
         vade_sinif_harita = {"AL": "alarm-iyi", "Yükseliş": "alarm-iyi", "SAT": "", "Düşüş": "",
-                             "NÖTR": "alarm-uyari", "Karışık": "alarm-uyari", "BEKLE": "alarm-uyari"}
-        vade_cols = st.columns(4)
+                             "NÖTR": "alarm-uyari", "Karışık": "alarm-uyari", "BEKLE": "alarm-uyari",
+                             "Sağlıklı": "alarm-iyi", "Riskli": ""}
+        vade_cols = st.columns(5)
         vade_bilgi = [
             ("Kısa Vade", kisa_durum, "RSI dönüşü + MACD"),
             ("Orta Vade", orta_durum, "Donchian kırılımı + ADX"),
             ("Uzun Vade", uzun_durum, "EMA50/200 + SuperTrend"),
             ("Tavsiye", tavsiye_durum, "Uzun vade kapılı bileşik"),
+            ("Temel Sağlık", temel_durum, "Cari oran + Net Borç/FAVÖK"),
         ]
         for col, (etiket, durum, yontem) in zip(vade_cols, vade_bilgi):
             with col:
@@ -724,8 +886,49 @@ with tab_teknik:
         st.caption(
             "ℹ️ Kısa/Orta vade sadece o gün yeni bir sinyal tetiklendiyse AL/SAT gösterir, aksi halde NÖTR. "
             "Uzun vade sürekli bir trend rejimi okumasıdır (Yükseliş/Düşüş/Karışık). Tavsiye, kısa/orta "
-            "sinyallerini yalnızca uzun vadenin izin verdiği yönde işleme çevirir."
+            "sinyallerini yalnızca uzun vadenin izin verdiği yönde işleme çevirir. Temel Sağlık, teknik sinyalden "
+            "bağımsız bir uyarıdır — 'AL' diyen bir sinyal, temel olarak riskli bir şirkette de çıkabilir."
         )
+        if is_banka:
+            st.caption("ℹ️ Banka hissesi — Temel Sağlık sadece F/K, PD/DD ve ROE'ye bakar (Cari Oran/Net Borç-FAVÖK bankacılıkta geçersiz).")
+
+        # ============ POZİSYON BÜYÜKLÜĞÜ HESAPLAYICI ============
+        st.markdown("<div class='fintables-header'>📐 Pozisyon Büyüklüğü Hesaplayıcı</div>", unsafe_allow_html=True)
+        guncel_fiyat_hesap, _, _ = get_canli_fiyat(secilen_ticker)
+        if guncel_fiyat_hesap is None:
+            guncel_fiyat_hesap = son_s['Close']
+        atr_guncel = son_s['ATR_14']
+
+        hesap_cols = st.columns(2)
+        with hesap_cols[0]:
+            toplam_sermaye = st.number_input(
+                "Toplam Sermaye (TL)", min_value=0.0, step=1000.0, value=100000.0,
+                key=f"sermaye_{secilen_ticker}"
+            )
+        with hesap_cols[1]:
+            risk_yuzdesi = st.slider(
+                "İşlem Başına Risk (%)", min_value=0.5, max_value=5.0, value=1.5, step=0.5,
+                key=f"risk_yuzde_{secilen_ticker}"
+            )
+
+        if pd.notna(atr_guncel) and atr_guncel > 0 and toplam_sermaye > 0:
+            risk_tutari = toplam_sermaye * (risk_yuzdesi / 100)
+            hisse_basi_risk = 2 * atr_guncel  # sistemin ATR-stop mesafesiyle tutarli
+            onerilen_adet = int(risk_tutari / hisse_basi_risk)
+            onerilen_tutar = onerilen_adet * guncel_fiyat_hesap
+            sonuc_cols = st.columns(3)
+            with sonuc_cols[0]:
+                st.metric("Önerilen Adet", f"{onerilen_adet:,}".replace(',', '.'))
+            with sonuc_cols[1]:
+                st.metric("Yaklaşık Tutar", f"{onerilen_tutar:,.2f} TL".replace(',', '.'))
+            with sonuc_cols[2]:
+                st.metric("Riske Atılan", f"{risk_tutari:,.2f} TL".replace(',', '.'))
+            st.caption(
+                f"Hesap: risk tutarı ÷ (2×ATR14) — ATR14 şu an {atr_guncel:.2f} TL, yani hisse başı ~{hisse_basi_risk:.2f} TL "
+                f"risk alınıyor (sistemin stop-loss mesafesiyle aynı). Bu sadece bir hesaplama aracıdır, otomatik emir göndermez."
+            )
+        else:
+            st.caption("Hesaplama için geçerli bir ATR/sermaye değeri gerekiyor.")
 
         # ============ GRAFİK ============
         st.markdown("<div class='fintables-header'>📉 Grafik (Son 1 Yıl)</div>", unsafe_allow_html=True)
@@ -833,6 +1036,32 @@ with tab_teknik:
                         st.metric("Ort. Getiri", f"{ozet['ortalama_getiri']:+.2f}%" if ozet else "—",
                                    delta=f"Al-Tut: {al_tut_getiri:+.1f}%")
 
+                    # --- Walk-forward tutarlılık kontrolü: pencereyi ikiye böl, iki yarıda ayrı test et ---
+                    orta_nokta = len(df_test) // 2
+                    _gerekce_bos = lambda idx: ""
+                    ilk_yari_df = df_test.iloc[:orta_nokta].reset_index(drop=True)
+                    son_yari_df = df_test.iloc[orta_nokta:].reset_index(drop=True)
+                    ilk_yari_al = al_k.iloc[:orta_nokta].reset_index(drop=True)
+                    ilk_yari_sat = sat_k.iloc[:orta_nokta].reset_index(drop=True)
+                    son_yari_al = al_k.iloc[orta_nokta:].reset_index(drop=True)
+                    son_yari_sat = sat_k.iloc[orta_nokta:].reset_index(drop=True)
+                    ilk_yari_islem = _islem_listesi_olustur(ilk_yari_df, ilk_yari_al, ilk_yari_sat, _gerekce_bos, stop_loss_fn=_atr_stop_loss_fn)
+                    son_yari_islem = _islem_listesi_olustur(son_yari_df, son_yari_al, son_yari_sat, _gerekce_bos, stop_loss_fn=_atr_stop_loss_fn)
+                    ilk_yari_ozet = _istatistik_ozeti(ilk_yari_islem)
+                    son_yari_ozet = _istatistik_ozeti(son_yari_islem)
+                    st.caption("🔁 Walk-forward tutarlılık kontrolü (pencere ikiye bölündü — sonuç şansa mı dayanıyor kontrol edilir):")
+                    wf_cols = st.columns(2)
+                    with wf_cols[0]:
+                        st.metric(
+                            f"İlk Yarı ({ilk_yari_df['Date'].iloc[0].strftime('%m.%Y')}-{ilk_yari_df['Date'].iloc[-1].strftime('%m.%Y')})",
+                            f"%{ilk_yari_ozet['kazanma_orani']:.0f} ({ilk_yari_ozet['toplam_islem']} işlem)" if ilk_yari_ozet else "— (işlem yok)",
+                        )
+                    with wf_cols[1]:
+                        st.metric(
+                            f"Son Yarı ({son_yari_df['Date'].iloc[0].strftime('%m.%Y')}-{son_yari_df['Date'].iloc[-1].strftime('%m.%Y')})",
+                            f"%{son_yari_ozet['kazanma_orani']:.0f} ({son_yari_ozet['toplam_islem']} işlem)" if son_yari_ozet else "— (işlem yok)",
+                        )
+
                     if islemler:
                         bt_fig = go.Figure()
                         bt_fig.add_trace(go.Candlestick(
@@ -872,5 +1101,31 @@ with tab_teknik:
             st.caption(
                 "⚠️ 2 yıllık veriyle sınırlı bir backtest — az sayıda işlem istatistiksel olarak güvenilir "
                 "olmayabilir. Stop-loss girişteki 2×ATR(14) seviyesine sabitlenmiştir (trailing değildir). "
+                "İlk yarı/son yarı kazanma oranları birbirinden çok farklıysa (örn. %80 → %20), sonucun "
+                "kalıcı bir edge'den değil o dönemin koşullarından kaynaklanmış olabileceğini unutma. "
                 "Geçmiş performans gelecekteki sonuçların garantisi değildir."
             )
+
+with tab_haber:
+    st.markdown("<div class='fintables-header'>📰 BIST ve Mali Piyasalar</div>", unsafe_allow_html=True)
+    genel_haberler = haber_cek("Borsa İstanbul BIST100 mali piyasalar", adet=8)
+    _haber_listesi_goster(genel_haberler)
+
+    st.markdown("---")
+    st.markdown("<div class='fintables-header'>🏢 Watchlist Şirket Haberleri</div>", unsafe_allow_html=True)
+    for ticker_db, ad in hisseler.items():
+        yf_sembol = ticker_db.replace('_', '.')
+        with st.expander(f"{ad} ({yf_sembol})"):
+            st.markdown(
+                f"<a href='https://www.kap.org.tr/tr/bist-sirketler' target='_blank' "
+                f"style='font-size:0.85em;'>🏛️ KAP'ta Resmi Bildirimleri Gör — ara: <b>{ticker_db.replace('_IS', '')}</b></a>",
+                unsafe_allow_html=True
+            )
+            st.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
+            sirket_haberleri = haber_cek(f"{ad} hisse", adet=6)
+            _haber_listesi_goster(sirket_haberleri)
+
+    st.caption(
+        "ℹ️ Haberler Google News RSS üzerinden çekilir (yapay zeka yorumu içermez, ham başlıklardır), "
+        "30 dakikada bir güncellenir. Kaynak ve tarih her haberin altında gösterilir."
+    )
