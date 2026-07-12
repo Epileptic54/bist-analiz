@@ -8,7 +8,7 @@ TICKERS = ["ASELS.IS", "ASTOR.IS", "THYAO.IS", "BIMAS.IS", "AKBNK.IS"]
 
 
 def fetch_data(ticker: str) -> pd.DataFrame:
-    df = yf.Ticker(ticker).history(period="2y", interval="1d")
+    df = yf.Ticker(ticker).history(period="1y", interval="1d")
     df = df.drop(columns=["Dividends", "Stock Splits"], errors="ignore")
     df = df.dropna(subset=["Close"])
     return df
@@ -28,7 +28,7 @@ def _rsi(series, length=14):
     return 100 - (100 / (1 + rs))
 
 
-def _atr(high, low, close, length=14):
+def _atr(high, low, close, length=10):
     prev_close = close.shift(1)
     tr = pd.concat([
         high - low,
@@ -55,6 +55,11 @@ def _adx(high, low, close, length=14):
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
     adx = dx.ewm(alpha=1 / length, adjust=False).mean()
     return plus_di, minus_di, adx
+
+
+def _obv(close, volume):
+    yon = close.diff().apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
+    return (yon * volume).fillna(0).cumsum()
 
 
 def _supertrend(df, length=10, multiplier=3):
@@ -89,6 +94,24 @@ def _supertrend(df, length=10, multiplier=3):
     return supertrend, direction
 
 
+def _stochrsi(rsi, stoch_length=14, k=3, d=3):
+    min_rsi = rsi.rolling(stoch_length).min()
+    max_rsi = rsi.rolling(stoch_length).max()
+    stoch = (rsi - min_rsi) / (max_rsi - min_rsi) * 100
+    k_line = stoch.rolling(k).mean()
+    d_line = k_line.rolling(d).mean()
+    return k_line, d_line
+
+
+def _bollinger(close, length=20, std_mult=2):
+    mid = close.rolling(length).mean()
+    std = close.rolling(length).std()
+    upper = mid + std_mult * std
+    lower = mid - std_mult * std
+    bandwidth = (upper - lower) / mid * 100
+    return upper, mid, lower, bandwidth
+
+
 def _macd(close, fast=12, slow=26, signal=9):
     macd_line = _ema(close, fast) - _ema(close, slow)
     signal_line = _ema(macd_line, signal)
@@ -96,39 +119,70 @@ def _macd(close, fast=12, slow=26, signal=9):
     return macd_line, signal_line, histogram
 
 
-def _donchian(high, low, length=20):
-    # Kendi gunu haric onceki 'length' gunun en yuksek/dusugu - bugunun mumuyla
-    # karsilastirildiginda lookahead-bias olmamasi icin shift(1) ile kaydiriliyor.
-    ust = high.rolling(length).max().shift(1)
-    alt = low.rolling(length).min().shift(1)
-    return ust, alt
+def _optimize_sinyalleri(macd_line, signal_line, supertrend_yon):
+    macd_fark = macd_line - signal_line
+    kesisim_yon = macd_fark.apply(lambda x: 1 if x > 0 else -1)
+    kesisim_degisim = kesisim_yon.diff()
+
+    optimize_al = (kesisim_degisim == 2) & (supertrend_yon == 1)
+    optimize_sat = (kesisim_degisim == -2) & (supertrend_yon == -1)
+    return optimize_al, optimize_sat
+
+
+def _squeeze_breakout(close, bbu, bbl, bbb, squeeze_pencere=120, squeeze_esik=0.10, squeeze_gecerlilik=5):
+    persentil = bbb.rolling(squeeze_pencere, min_periods=squeeze_pencere // 2).quantile(squeeze_esik)
+    sikisma_var = (bbb <= persentil).fillna(False)
+    yakin_zamanda_sikisma = sikisma_var.astype(int).rolling(squeeze_gecerlilik, min_periods=1).max() > 0
+    onceki_sikisma = yakin_zamanda_sikisma.shift(1).fillna(False)
+
+    breakout_al = (close > bbu) & onceki_sikisma
+    breakout_sat = (close < bbl) & onceki_sikisma
+
+    # Sadece kirilmanin ilk gunu sinyal sayilsin, ustuste tekrar etmesin
+    breakout_al = breakout_al & ~breakout_al.shift(1).fillna(False)
+    breakout_sat = breakout_sat & ~breakout_sat.shift(1).fillna(False)
+
+    return breakout_al, breakout_sat
 
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    df['EMA_50'] = _ema(df['Close'], 50)
+    df['EMA_200'] = _ema(df['Close'], 200)
     df['RSI_14'] = _rsi(df['Close'], 14)
+
+    supertrend, direction = _supertrend(df, length=10, multiplier=3)
+    df['SUPERT_10_3'] = supertrend
+    df['SUPERTd_10_3'] = direction
+
+    k_line, d_line = _stochrsi(df['RSI_14'])
+    df['STOCHRSIk_14_14_3_3'] = k_line
+    df['STOCHRSId_14_14_3_3'] = d_line
+
+    bbu, bbm, bbl, bbb = _bollinger(df['Close'], 20, 2)
+    df['BBU_20_2.0'] = bbu
+    df['BBM_20_2.0'] = bbm
+    df['BBL_20_2.0'] = bbl
+    df['BBB_20_2.0'] = bbb
 
     macd_line, signal_line, hist = _macd(df['Close'], 12, 26, 9)
     df['MACD_12_26_9'] = macd_line
     df['MACDs_12_26_9'] = signal_line
     df['MACDh_12_26_9'] = hist
 
-    df['EMA_50'] = _ema(df['Close'], 50)
-    df['EMA_200'] = _ema(df['Close'], 200)
+    optimize_al, optimize_sat = _optimize_sinyalleri(macd_line, signal_line, direction)
+    df['Optimize_AL'] = optimize_al
+    df['Optimize_SAT'] = optimize_sat
 
-    supertrend, direction = _supertrend(df, length=10, multiplier=3)
-    df['SUPERT_10_3'] = supertrend
-    df['SUPERTd_10_3'] = direction
-
-    donchian_ust, donchian_alt = _donchian(df['High'], df['Low'], 20)
-    df['DONCHIAN_UST_20'] = donchian_ust
-    df['DONCHIAN_ALT_20'] = donchian_alt
+    squeeze_al, squeeze_sat = _squeeze_breakout(df['Close'], bbu, bbl, bbb)
+    df['Squeeze_AL'] = squeeze_al
+    df['Squeeze_SAT'] = squeeze_sat
 
     plus_di, minus_di, adx = _adx(df['High'], df['Low'], df['Close'], 14)
     df['DMP_14'] = plus_di
     df['DMN_14'] = minus_di
     df['ADX_14'] = adx
 
-    df['ATR_14'] = _atr(df['High'], df['Low'], df['Close'], 14)
+    df['OBV'] = _obv(df['Close'], df['Volume'])
 
     return df
 

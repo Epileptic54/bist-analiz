@@ -8,18 +8,15 @@ Kişisel bir BIST (Borsa İstanbul) portföy takip panelim. Watchlist dinamik (S
 - Arayüz: Streamlit, `app.py` tek dosya (~470 satır) + `data_engine.py` (ham OHLCV veri çekme/DB kaydetme).
 - Depolama: yerel SQLite (`bist_portfolio.db`) — ticker başına ham OHLCV tablosu (`ASELS_IS` vb.) + `watchlist`/`portfoy` tabloları. **Streamlit Cloud'da bu disk geçici (ephemeral)** — redeploy/restart'ta veri kaybolabilir, henüz çözülmedi.
 
-## 2026-07-12: Strateji/AI katmanı silindi, sonra teknik analiz katmanı sıfırdan yeniden kuruldu
-Sabah/öğlen bir teknik analiz motoru (EMA/RSI/MACD/ADX/SuperTrend/StochRSI/Bollinger/OBV indikatörleri, Kısa/Orta/Uzun Vade trend sistemi, Destek/Direnç, Fibonacci, backtest, 3 panelli Plotly grafiği) ve üç AI entegrasyonu (Gemini, Claude, Groq) vardı. Backtest'i 2 yıllık veriyle derinlemesine test ettikten sonra basit "al-tut"un stratejileri büyük farkla geçtiği görüldü — kullanıcı kararıyla **tüm strateji/indikatör/backtest/grafik katmanı ve tüm AI entegrasyonları (Claude/Groq/Anthropic/Tavily) koddan tamamen silindi** (commit 2c6640e, 19:28).
+## 2026-07-12: Bir günde silindi, yeniden kuruldu, sonra 10 Temmuz haline geri alındı
+Aynı gün içinde üç aşama yaşandı: (1) 19:28'de tüm strateji/indikatör/backtest/AI katmanı silindi (`2c6640e`), (2) 20:22-21:11 arası teknik analiz katmanı sıfırdan yeniden kuruldu (`5c5da26`, `fb759aa`, AI hariç), (3) kullanıcı bu deneyden memnun kalmayıp **günün tüm değişikliklerini geri alıp `app.py`/`data_engine.py`'yi 10 Temmuz'daki (`b4d34a8`) haline döndürdü**. Yani şu an kod tabanı, 12 Temmuz'da hiç dokunulmamış gibi — 10 Temmuz'daki eski sistemle aynı.
 
-Aynı gün akşam bu karardan dönülüp **teknik analiz katmanı kanıta dayalı, 4 aşamalı backtest yaklaşımıyla sıfırdan yeniden kuruldu** (commit 5c5da26, 20:22; güçlendirme fb759aa, 21:11). **AI entegrasyonları (Claude/Groq/Tavily) bilinçli olarak geri eklenmedi** — sadece teknik analiz katmanı geri geldi.
+## Mevcut Sistem (10 Temmuz hali — b4d34a8)
+Eski teknik analiz motoru geri geldi: EMA/RSI/MACD/ADX/SuperTrend/StochRSI/Bollinger/OBV indikatörleri, Kısa/Orta/Uzun Vade trend sistemi, Destek/Direnç, Fibonacci, backtest, 3 panelli Plotly grafiği. Üç AI entegrasyonu (Gemini, Claude, Groq) da geri geldi. Portföydeki stop-loss/hedef disiplin kontrolü (destek/direnç'e bağımlı) da geri geldi.
 
-## Mevcut Sekme Yapısı (güncel)
-Üç sekme: **💼 Portföy** (adet/maliyet/kâr-zarar), **📈 Teknik Analiz** (RSI/MACD/EMA indikatörleri + backtest, `data_engine.py`'de hesaplanıyor), **📰 Haberler** (Google News RSS, API anahtarı/AI kullanmaz — otomatik-üretilmiş "günlük teknik analiz" şablonlu başlıklar spam filtresiyle eleniyor). Üstte her zaman Watchlist Yönetimi ve Günlük Özet (yoğunlaşma/çeşitlilik uyarısı — pozisyon büyüklüğü bazlı, teknik göstergeden bağımsız) var.
+**Not:** 12 Temmuz'daki backtest denemesinde 2 yıllık veriyle basit "al-tut" stratejisinin Vade/Destek-Direnç stratejilerini büyük farkla geçtiği görülmüştü (bkz. git geçmişi, `2c6640e` öncesi commit mesajları). Kullanıcı bu bulguya rağmen eski sisteme dönmeyi tercih etti — ileride tekrar "stratejiyi basitleştirelim" denirse bu geçmişi hatırlat, ama karar kullanıcıya ait.
 
-Yeni değişiklik yapmadan önce mevcut `app.py`'yi oku — bu dosyadaki notlar hızlı değişebiliyor, git log tarihine güven.
-
-## Risk Yönetimi Katmanı
-Yoğunlaşma uyarısı (tek pozisyon %35'i geçerse) ve çeşitlilik uyarısı (<3 pozisyon) — `_portfoy_risk_uyarilari()`. Teknik gösterge bazlı stop-loss/hedef kontrolü portföy tarafında yok (bu, Teknik Analiz sekmesindeki backtest'ten ayrı).
+Yeni değişiklik yapmadan önce mevcut `app.py`'yi oku — bu dosyadaki notlar hızlı değişebiliyor, git log tarihine güven, geçmiş konuşmalara değil.
 
 ## Canlı Fiyat
 Günlük mum verisi (`history()`) bazen o günün OHLC'sini NaN bırakıyor veya bir gün gecikiyor — bu yüzden `get_canli_fiyat()` `fast_info` üzerinden anlık fiyatı ayrıca çekiyor (60sn cache), başarısız olursa son kapanışa düşüyor. Fiyatın yanında kontrol saati (HH:MM) gösteriliyor.
